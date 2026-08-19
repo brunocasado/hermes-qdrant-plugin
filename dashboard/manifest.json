@@ -1,0 +1,6 @@
+{
+  "name": "qdrant-index",
+  "label": "Qdrant Index",
+  "description": "Semantic project index status + reindex",
+  "api": "plugin_api.py"
+}

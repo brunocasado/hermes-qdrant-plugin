@@ -1,0 +1,13 @@
+# Local state — per-machine, never publish
+data/
+*.json.bak
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# OS
+.DS_Store

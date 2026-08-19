@@ -1,0 +1,14 @@
+name: qdrant-index
+version: 0.1.0
+description: "Semantic index of project files in Qdrant — tools, auto-reindex hooks, statusbar pill."
+hooks:
+  - post_tool_call
+provides_tools:
+  - qdrant_index
+  - qdrant_search
+  - qdrant_status
+  - qdrant_list_collections
+  - qdrant_delete_collection
+  - qdrant_set_server
+provides_hooks:
+  - post_tool_call
