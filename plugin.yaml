@@ -1,6 +1,19 @@
-name: qdrant-index
+name: hermes-qdrant-plugin
 version: 0.1.0
 description: "Semantic index of project files in Qdrant — tools, auto-reindex hooks, statusbar pill."
+manifest_version: 2
+api_version: 1
+license: MIT
+homepage: https://github.com/brunocasado/hermes-qdrant-plugin
+tags:
+  - qdrant
+  - semantic-search
+  - vector
+  - indexing
+  - desktop
+python_dependencies:
+  - "qdrant-client>=1.7,<2"
+  - "httpx>=0.27,<1"
 hooks:
   - post_tool_call
 provides_tools:

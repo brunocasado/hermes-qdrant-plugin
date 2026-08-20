@@ -1,8 +1,8 @@
-"""REST door for the desktop statusbar pill. Mounted at /api/plugins/qdrant-index/.
+"""REST door for the desktop statusbar pill. Mounted at /api/plugins/hermes-qdrant-plugin/.
 
 The web server imports this module at startup (see hermes_cli.web_server.py
 ``_mount_plugin_api_routes``) and mounts the module-level ``router`` under
-``/api/plugins/qdrant-index/``. The pill calls:
+``/api/plugins/hermes-qdrant-plugin/``. The pill calls:
 
     GET  /status?root=<abs path>
     POST /reindex?root=<abs path>

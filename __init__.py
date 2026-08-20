@@ -1,4 +1,4 @@
-"""qdrant-index plugin — agent half.
+"""hermes-qdrant-plugin — agent half.
 
 Registers the 5 Qdrant tools (index / search / status / list / delete),
 the post_tool_call auto-reindex hook (60s debounce), and the
@@ -154,7 +154,7 @@ def register(ctx):
                                     "message": message, "at": time.time()}
 
         threading.Thread(target=_bg, daemon=True,
-                         name=f"qdrant-index-{collection}").start()
+                         name=f"qdrant-{collection}").start()
         return root, collection, False
 
     def _wait_for_index(root, timeout):
@@ -476,7 +476,7 @@ def register(ctx):
         if name not in EDIT_TOOLS:
             return
         # Master switch off: the user disabled automatic indexing — skip
-        # silently (manual /qdrant-index index still works).
+        # silently (manual /qdrant index still works).
         if not qconfig.is_enabled():
             return
         args = kwargs.get("args") or {}
@@ -509,7 +509,7 @@ def register(ctx):
 
     ctx.register_hook("post_tool_call", _on_tool_call)
 
-    # --- Slash command: /qdrant-index (terminal-free bootstrap/maintenance) ---
+    # --- Slash command: /qdrant (terminal-free bootstrap/maintenance) ---
     # The tools below are async and already push blocking I/O (Qdrant calls,
     # disk walks) off the event loop via asyncio.to_thread, so awaiting them
     # here never stalls the gateway's command.dispatch (30s RPC timeout).
@@ -530,14 +530,14 @@ def register(ctx):
             return "Reset to built-in defaults (config.json removed).\n\n" + qconfig.describe()
         if act == "get":
             if len(parts) < 2 or parts[1] not in _VALID_KEYS:
-                return f"Usage: /qdrant-index config get <key>  (keys: {', '.join(_VALID_KEYS)})"
+                return f"Usage: /qdrant config get <key>  (keys: {', '.join(_VALID_KEYS)})"
             if parts[1] == "enabled":
                 return f"enabled = {str(qconfig.is_enabled()).lower()}"
             section, key = parts[1].split(".", 1)
             return f"{parts[1]} = {qconfig.load_config()[section][key]}"
         if act == "set":
             if len(parts) < 3 or parts[1] not in _VALID_KEYS:
-                return f"Usage: /qdrant-index config set <key> <value>  (keys: {', '.join(_VALID_KEYS)})"
+                return f"Usage: /qdrant config set <key> <value>  (keys: {', '.join(_VALID_KEYS)})"
             if parts[1] == "enabled":
                 if parts[2] in ("on", "true", "1"):
                     qconfig.save_config({"enabled": True})
@@ -561,7 +561,7 @@ def register(ctx):
     async def _cmd_qdrant(raw_args: str):
         parts = (raw_args or "").split()
         if not parts:
-            return ("Usage: /qdrant-index index [dir] | status [dir] | "
+            return ("Usage: /qdrant index [dir] | status [dir] | "
                     "search <query> [limit] | list | delete <collection> | "
                     "config [show | set <key> <value> | reset]")
         sub = parts[0]
@@ -581,16 +581,16 @@ def register(ctx):
             if rest and rest[-1].isdigit():
                 limit = int(rest.pop())
             if not rest:
-                return "Usage: /qdrant-index search <query> [limit]"
+                return "Usage: /qdrant search <query> [limit]"
             return await _do_search(query=" ".join(rest), limit=limit)
         if sub == "delete":
             if len(parts) < 2:
-                return "Usage: /qdrant-index delete <collection>"
+                return "Usage: /qdrant delete <collection>"
             return await _do_delete_collection(collection_name=parts[1])
         return f"Unknown subcommand '{sub}'. Try: index | status | search | list | delete"
 
     ctx.register_command(
-        "qdrant-index",
+        "qdrant",
         _cmd_qdrant,
         description="Qdrant semantic index: index/status/search/list/delete for the current project",
         args_hint="[index|status|search|list|delete] [args]",

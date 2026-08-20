@@ -1,5 +1,5 @@
 {
-  "name": "qdrant-index",
+  "name": "hermes-qdrant-plugin",
   "label": "Qdrant Index",
   "description": "Semantic project index status + reindex",
   "api": "plugin_api.py"

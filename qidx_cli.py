@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""qdrant-index CLI — thin wrapper over core.py for terminal use.
+"""hermes-qdrant-plugin CLI — thin wrapper over core.py for terminal use.
 
 Usage:
   qidx index [dir] [--collection NAME] [--reindex]
@@ -178,7 +178,7 @@ def cmd_config(a):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="qdrant-index", description=__doc__,
+    ap = argparse.ArgumentParser(prog="hermes-qdrant-plugin", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 

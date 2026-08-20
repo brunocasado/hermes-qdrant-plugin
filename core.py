@@ -1,7 +1,7 @@
 """Qdrant Semantic Search core logic.
 
 Ported from ~/projects/qdrant-mcp-server/server.py (lines 31-329) for the
-Hermes qdrant-index plugin. Uses an OpenAI-compatible embedding API and
+Hermes Qdrant plugin (hermes-qdrant-plugin). Uses an OpenAI-compatible embedding API and
 connects to a Qdrant server — both are runtime-editable (no code change) via
 `qidx config set ...` or the qdrant_set_server tool; see qconfig.py.
 Defaults: Qdrant at localhost:6333, embeddings at http://localhost:8080/v1
@@ -33,11 +33,6 @@ logger = logging.getLogger(__name__)
 CHUNK_SIZE = 10  # Lines per chunk - API has ~512 token limit per request
 CHUNK_OVERLAP = 3
 
-# --- Data dir ---
-DATA_DIR = Path.home() / ".hermes" / "plugins" / "qdrant-index" / "data"
-HASH_CACHE_PATH = DATA_DIR / "hash-cache.json"
-LEGACY_CACHE_PATH = Path.home() / ".hermes" / "qdrant-hash-cache.json"
-
 # Dual-mode import (plugin package vs plugin-dir-on-sys.path):
 try:
     from . import registry as _registry
@@ -45,6 +40,13 @@ try:
 except ImportError:
     import registry as _registry
     import qconfig as _qconfig
+
+# --- Data dir ---
+# Sanctioned per-plugin state root (see paths.py) — survives plugin
+# update/remove and follows the active profile.
+DATA_DIR = _qconfig.DATA_DIR
+HASH_CACHE_PATH = DATA_DIR / "hash-cache.json"
+LEGACY_CACHE_PATH = Path.home() / ".hermes" / "qdrant-hash-cache.json"
 
 # --- Globals ---
 _client: Optional[object] = None

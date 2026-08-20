@@ -3,7 +3,13 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-DATA_DIR = Path.home() / ".hermes" / "plugins" / "qdrant-index" / "data"
+# Dual-mode import (plugin package vs plugin-dir-on-sys.path).
+try:
+    from . import paths as _paths
+except ImportError:
+    import paths as _paths
+
+DATA_DIR = _paths.ensure_data_dir()
 REGISTRY_PATH = DATA_DIR / "registry.json"
 
 

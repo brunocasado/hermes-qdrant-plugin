@@ -1,4 +1,4 @@
-"""qdrant-index — runtime-editable server & embedding config.
+"""hermes-qdrant-plugin — runtime-editable server & embedding config.
 
 Lets you point the plugin at a different Qdrant server and/or a different
 embedding endpoint without touching code. Three ways to set values (highest
@@ -37,8 +37,16 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-# Same data dir core.py uses (kept local to avoid an import cycle).
-DATA_DIR = Path.home() / ".hermes" / "plugins" / "qdrant-index" / "data"
+# Dual-mode import (plugin package vs plugin-dir-on-sys.path)
+try:
+    from . import paths as _paths
+except ImportError:
+    import paths as _paths
+
+# Data dir — the sanctioned per-plugin state root (see paths.py). Resolved
+# lazily so a standalone CLI (no Hermes process) still works, and migrated
+# from the old install-tree location on first access.
+DATA_DIR = _paths.ensure_data_dir()
 CONFIG_PATH = DATA_DIR / "config.json"
 
 # Built-in defaults — generic placeholders; override via config.json or env.

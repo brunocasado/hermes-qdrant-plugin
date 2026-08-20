@@ -1,5 +1,5 @@
 /**
- * qdrant-index — desktop statusbar pill (runtime-loaded ESM, NO JSX).
+ * hermes-qdrant-plugin — desktop statusbar pill (runtime-loaded ESM, NO JSX).
  *
  * Loaded by the runtime pipeline (specifier rewrite -> SDK/react shim blobs ->
  * blob import -> register). Plain ESM js with jsx()/jsxs() calls — exactly what
@@ -69,7 +69,7 @@ function Field({ label, hint, ...props }) {
 }
 
 export default {
-  id: 'qdrant-index',
+  id: 'hermes-qdrant-plugin',
   name: 'Qdrant Index',
   description: 'Semantic index of the focused project — live file count + staleness, and server/embedding settings.',
   defaultEnabled: false,
