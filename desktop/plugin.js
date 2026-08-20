@@ -144,7 +144,7 @@ export default {
         refetchIntervalInBackground: true
       })
 
-      const { data: cfg, refetch: refetchCfg } = useQuery({
+      const { data: cfg, refetch: refetchCfg, isError: cfgError } = useQuery({
         queryKey: ['qdrant', 'config'],
         queryFn: () => ctx.rest('/config'),
         enabled: view === 'settings'
@@ -402,7 +402,15 @@ export default {
                           ]
                         }),
                         !form
-                          ? jsx('div', { className: 'text-[0.75rem] text-muted-foreground', children: 'Loading…' })
+                          ? cfgError
+                            ? jsxs('div', {
+                                className: 'flex flex-col gap-2 text-[0.75rem]',
+                                children: [
+                                  jsx('span', { className: 'text-red-400', children: 'Failed to load config — backend REST door unreachable (404/timeout).' }),
+                                  jsx('span', { className: 'text-muted-foreground', children: 'If you renamed or reinstalled this plugin, fully quit and relaunch Hermes (⌘Q) so the web server re-mounts the API routes.' })
+                                ]
+                              })
+                            : jsx('div', { className: 'text-[0.75rem] text-muted-foreground', children: 'Loading…' })
                           : jsxs('div', {
                               className: 'flex flex-col gap-3',
                               children: [
