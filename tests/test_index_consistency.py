@@ -9,10 +9,11 @@ import registry
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, schema_current=False):
         self.events = []
         self.points = 10
         self.last_points = []
+        self.schema_current = schema_current
 
     def count(self, collection_name):
         return SimpleNamespace(count=self.points)
@@ -20,6 +21,7 @@ class FakeClient:
     def create_collection(self, **kwargs):
         self.events.append(("create_collection", kwargs["collection_name"]))
         self.points = 0
+        self.schema_current = True
 
     def delete_collection(self, collection_name):
         self.events.append(("delete_collection", collection_name))
@@ -33,6 +35,13 @@ class FakeClient:
         self.last_points.extend(points)
         self.events.append(("upsert", [p.payload["rel_path"] for p in points]))
         self.points += len(points)
+
+    def get_collection(self, collection_name):
+        vectors = {"dense": SimpleNamespace(size=768)} if self.schema_current else SimpleNamespace(size=768)
+        sparse = {"lexical": SimpleNamespace()} if self.schema_current else None
+        return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(
+            vectors=vectors, sparse_vectors=sparse,
+        )))
 
 
 def _isolate(monkeypatch, tmp_path, fake):
@@ -53,6 +62,22 @@ def _isolate(monkeypatch, tmp_path, fake):
 
 def _deleted_rel_paths(fake):
     return [value for event, value in fake.events if event == "delete_file"]
+
+
+def test_discovery_excludes_tool_worktrees_but_keeps_project_sources(tmp_path):
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "main.ts").write_text("export const main = 1\n")
+    (root / ".worktrees" / "branch").mkdir(parents=True)
+    (root / ".worktrees" / "branch" / "copy.ts").write_text("copy\n")
+    (root / "package" / ".kilo" / "worktrees" / "task").mkdir(parents=True)
+    (root / "package" / ".kilo" / "worktrees" / "task" / "copy.ts").write_text("copy\n")
+
+    discovered = {
+        str(Path(path).relative_to(root)) for path in core.discover_files(str(root))
+    }
+
+    assert discovered == {"src/main.ts"}
 
 
 def test_changed_file_deletes_old_points_before_upsert(monkeypatch, tmp_path):
@@ -101,6 +126,33 @@ def test_registered_legacy_schema_is_rebuilt_automatically(monkeypatch, tmp_path
 
     names = [event[0] for event in fake.events]
     assert names[:2] == ["delete_collection", "create_collection"]
+    assert json.loads(registry.REGISTRY_PATH.read_text())["project"]["schema_version"] == core.INDEX_SCHEMA_VERSION
+
+
+def test_interrupted_schema_upgrade_resumes_without_recreating_collection(monkeypatch, tmp_path):
+    """A new-schema collection plus a partial cache must resume, never restart."""
+    fake = FakeClient(schema_current=True)
+    _isolate(monkeypatch, tmp_path, fake)
+    root = tmp_path / "project"
+    root.mkdir()
+    completed = root / "completed.py"
+    pending = root / "pending.py"
+    completed.write_text("print('done')\n")
+    pending.write_text("print('pending')\n")
+    core.save_hash_cache("project", {
+        "completed.py": {"hash": core.file_hash(str(completed))},
+    })
+    registry.REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    registry.REGISTRY_PATH.write_text(json.dumps({
+        "project": {"root": str(root.resolve()), "file_count": 2}
+    }))
+
+    asyncio.run(core.index_directory(str(root), collection_name="project"))
+
+    names = [event[0] for event in fake.events]
+    assert "delete_collection" not in names
+    assert "create_collection" not in names
+    assert [p.payload["rel_path"] for p in fake.last_points] == ["pending.py"]
     assert json.loads(registry.REGISTRY_PATH.read_text())["project"]["schema_version"] == core.INDEX_SCHEMA_VERSION
 
 

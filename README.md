@@ -18,13 +18,15 @@ question → dense + lexical retrieval → file aggregation → top 5–8 files 
 ## Retrieval architecture
 
 1. Files are keyed by `rel_path`; stale points are deleted before changed files are upserted, and deleted files are purged.
-2. Python uses stdlib AST structural chunks; JS/TS, Go, Rust and Java use official Tree-sitter bindings. Unsupported/worker-thread paths fall back safely to token-budgeted chunks.
-3. Final enriched embedding inputs are hard-bounded for a 512-token-class model; content is split, never silently truncated.
+2. Python uses stdlib AST structural chunks; JS/TS uses a crash-safe pure-Python declaration/brace parser; Go, Rust and Java use official Tree-sitter bindings. Unsupported/worker-thread paths fall back safely to token-budgeted chunks.
+3. Final enriched embedding inputs are hard-bounded to a live-probed 480-character ceiling for the 512-token-class local model; content is split, never silently truncated.
 4. Embedding text includes project, relative path, language, symbols and raw code.
 5. Each point stores `rel_path`, basename, language, symbols, chunk type, line range and file hash.
 6. Qdrant stores named `dense` and `lexical` sparse vectors.
 7. Exact identifiers/path-like queries prefer lexical search; natural-language questions prefer dense; mixed queries combine both with Reciprocal Rank Fusion.
 8. Internal retrieval is broad (at least 60 chunks); output is narrow (at most 8 files), ranked with multi-chunk, symbol and path evidence.
+
+Tool-generated worktrees/state directories such as `.worktrees/`, `.kilo/` and `.hermes/` are excluded so temporary branch copies do not duplicate the main project index.
 
 Qdrant is navigation evidence, not source of truth. Consumers should read returned files before reasoning or editing.
 

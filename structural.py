@@ -63,12 +63,6 @@ def _make_parser(language: str):
     if language == "python":
         import tree_sitter_python as binding
         capsule = binding.language()
-    elif language == "javascript":
-        import tree_sitter_javascript as binding
-        capsule = binding.language()
-    elif language in {"typescript", "tsx"}:
-        import tree_sitter_typescript as binding
-        capsule = binding.language_tsx() if language == "tsx" else binding.language_typescript()
     elif language == "go":
         import tree_sitter_go as binding
         capsule = binding.language()
@@ -141,6 +135,90 @@ def _python_ast_chunks(filepath: str, text: str, chunk_tokens: int,
     return chunks
 
 
+def _matching_brace(text: str, opening: int) -> int:
+    """Return the closing brace index, ignoring quoted strings and comments."""
+    depth = 0
+    quote = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    index = opening
+    while index < len(text):
+        char = text[index]
+        nxt = text[index + 1] if index + 1 < len(text) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+        elif block_comment:
+            if char == "*" and nxt == "/":
+                block_comment = False
+                index += 1
+        elif quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char == "/" and nxt == "/":
+            line_comment = True
+            index += 1
+        elif char == "/" and nxt == "*":
+            block_comment = True
+            index += 1
+        elif char in {"'", '"', "`"}:
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return len(text) - 1
+
+
+def _javascript_chunks(filepath: str, text: str, chunk_tokens: int,
+                       overlap_tokens: int) -> list[dict]:
+    """Pure-Python JS/TS structure; avoids the crashing native TS binding."""
+    declarations = re.compile(
+        r"(?m)^\s*(?:export\s+)?(?:default\s+)?"
+        r"(?:(?P<async>async)\s+)?(?P<kind>function|class|interface)\s+"
+        r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)[^\n{]*\{"
+    )
+    methods = re.compile(
+        r"(?m)^\s*(?:async\s+)?(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)"
+        r"\s*\([^;\n{}]*\)\s*(?::[^\n{]+)?\{"
+    )
+    specs = []
+    for match in declarations.finditer(text):
+        kind = match.group("kind")
+        chunk_type = "function" if kind == "function" else kind
+        specs.append((match.start(), match.end() - 1, chunk_type))
+    for match in methods.finditer(text):
+        if match.group("name") in {"if", "for", "while", "switch", "catch"}:
+            continue
+        specs.append((match.start(), match.end() - 1, "method"))
+
+    chunks = []
+    covered_until = -1
+    for start, opening, chunk_type in sorted(specs):
+        if start < covered_until:
+            continue
+        end = _matching_brace(text, opening) + 1
+        covered_until = end
+        code = text[start:end]
+        base_line = text.count("\n", 0, start) + 1
+        chunks.extend(token_chunks_from_text(
+            code, filepath=filepath, chunk_tokens=chunk_tokens,
+            overlap_tokens=overlap_tokens, base_line=base_line,
+            chunk_type=chunk_type, symbols=extract_symbols(code),
+        ))
+    for index, chunk in enumerate(chunks):
+        chunk["chunk_index"] = index
+    return chunks
+
+
 def structural_chunks(filepath: str, chunk_tokens: int = 400,
                       overlap_tokens: int = 60) -> list[dict]:
     # py-tree-sitter native grammars can crash when invoked from worker
@@ -157,6 +235,8 @@ def structural_chunks(filepath: str, chunk_tokens: int = 400,
     ext = Path(filepath).suffix.lower()
     if ext == ".py":
         return _python_ast_chunks(filepath, text, chunk_tokens, overlap_tokens)
+    if ext in {".js", ".jsx", ".ts", ".tsx"}:
+        return _javascript_chunks(filepath, text, chunk_tokens, overlap_tokens)
     if ext in CONFIG_EXTS:
         config = _config_chunks(filepath, text, chunk_tokens, overlap_tokens)
         if config:

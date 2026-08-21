@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # See qconfig.py for the full shape and the env-var names.
 CHUNK_SIZE = 350  # estimated tokens per chunk (metadata must also fit 512)
 CHUNK_OVERLAP = 60  # estimated token overlap
-EMBEDDING_MAX_CHARS = 900  # observed-safe ceiling for the local 512-token model
+EMBEDDING_MAX_CHARS = 480  # live-probed safe ceiling for the local 512-token model
 
 # Dual-mode import (plugin package vs plugin-dir-on-sys.path):
 try:
@@ -157,7 +157,7 @@ async def get_embeddings(texts: list[str]) -> list[list[float]]:
 
 
 # --- File Discovery ---
-SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".idea", ".vscode", "dist", "build", ".next", ".nuxt", ".output", ".cache", "vendor", "target", "out", "bin", "obj", ".hermes", "benchmarks"}
+SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".idea", ".vscode", ".worktrees", ".kilo", "dist", "build", ".next", ".nuxt", ".output", ".cache", "vendor", "target", "out", "bin", "obj", ".hermes", "benchmarks"}
 SKIP_EXTS = {".lock", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".map", ".pt", ".pth", ".bin", ".so", ".dylib", ".dll", ".exe", ".pyc", ".pyo", ".DS_Store"}
 INDEXABLE_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs",
@@ -431,14 +431,46 @@ def build_point_payload(*, root: str, filepath: str, chunk: str,
 
 def build_embedding_text(*, project: str, rel_path: str, language: str,
                          symbols: list[str], code: str) -> str:
-    """Augment raw code with project navigation metadata."""
+    """Augment code with compact navigation metadata.
+
+    Paths/symbols are navigation hints, so bound only that metadata. Raw code
+    is never truncated here; ``prepare_embedding_chunks`` splits it instead.
+    """
+    def clip(value: str, limit: int, *, keep_end: bool = False) -> str:
+        if len(value) <= limit:
+            return value
+        if keep_end:
+            return "…" + value[-(limit - 1):]
+        return value[:limit - 1] + "…"
+
+    project = clip(project, 24)
+    rel_path = clip(rel_path, 96, keep_end=True)
+    language = clip(language, 16)
+    symbol_text = clip(", ".join(symbols), 64)
     return (
         f"project: {project}\n"
         f"path: {rel_path}\n"
         f"language: {language}\n"
-        f"symbols: {', '.join(symbols)}\n"
+        f"symbols: {symbol_text}\n"
         f"code:\n{code}"
     )
+
+
+def collection_schema_is_current(client, collection_name: str, vector_dim: int) -> bool:
+    """Read Qdrant's actual schema; registry metadata may lag after a crash."""
+    try:
+        params = client.get_collection(collection_name).config.params
+        vectors = params.vectors
+        sparse = params.sparse_vectors
+        return (
+            isinstance(vectors, dict)
+            and "dense" in vectors
+            and int(vectors["dense"].size) == vector_dim
+            and isinstance(sparse, dict)
+            and "lexical" in sparse
+        )
+    except Exception:
+        return False
 
 
 def prepare_embedding_chunks(chunks: list[dict], *, filepath: str, project: str,
@@ -542,7 +574,12 @@ async def _index_directory_locked(
     if (isinstance(registered, dict)
             and registered.get("root") == str(dir_path)
             and int(registered.get("schema_version", 0)) < INDEX_SCHEMA_VERSION):
-        reindex = True
+        if collection_schema_is_current(c, collection_name, vector_dim):
+            # A previous rebuild created the new collection but was interrupted
+            # before the final registry.record(). Resume from per-file cache.
+            _registry.mark_schema_current(collection_name, str(dir_path))
+        else:
+            reindex = True
 
     # Ensure collection exists, and learn whether it actually holds points.
     # The hash cache is a *cache of Qdrant's state* — if the user deleted the
@@ -563,6 +600,7 @@ async def _index_directory_locked(
                 "lexical": models.SparseVectorParams(modifier=models.Modifier.IDF)
             },
         )
+        _registry.mark_schema_current(collection_name, str(dir_path))
         invalidate_live_state(collection_name)
         live_state, live_count = "empty", 0
     else:
@@ -575,6 +613,7 @@ async def _index_directory_locked(
                     "lexical": models.SparseVectorParams(modifier=models.Modifier.IDF)
                 },
             )
+            _registry.mark_schema_current(collection_name, str(dir_path))
             invalidate_live_state(collection_name)
             live_state, live_count = "empty", 0
 

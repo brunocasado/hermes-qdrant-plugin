@@ -33,7 +33,7 @@ def test_python_functions_are_structural_chunks_with_symbols(tmp_path):
     assert schedule["line_end"] == 2
 
 
-def test_javascript_exported_object_method_is_structural(tmp_path):
+def test_javascript_exported_object_method_is_structural_without_native_parser(tmp_path, monkeypatch):
     source = tmp_path / "plugin.js"
     source.write_text(
         "export default {\n"
@@ -44,6 +44,10 @@ def test_javascript_exported_object_method_is_structural(tmp_path):
         "}\n"
     )
 
+    import structural
+    monkeypatch.setattr(structural, "_make_parser", lambda _lang: (_ for _ in ()).throw(
+        AssertionError("JS/TS must not enter the native parser")
+    ))
     chunks = core.chunk_file(str(source), chunk_size=350, chunk_overlap=60)
 
     register = next(chunk for chunk in chunks if "register(ctx)" in chunk["chunk"])
@@ -100,3 +104,22 @@ def test_final_embedding_inputs_are_hard_bounded_without_truncation(tmp_path):
     assert len(prepared) > 1
     assert all(len(text) <= core.EMBEDDING_MAX_CHARS for text in texts)
     assert marker in "".join(chunk["chunk"] for chunk in prepared)
+
+
+def test_embedding_ceiling_stays_below_observed_512_token_model_limit(tmp_path):
+    """High-token-density source must stay under the live-tested safe ceiling."""
+    source = tmp_path / "symbols.txt"
+    source.write_text(("!@#$%^&*()_+-=[]{}|;:,.<>?/" * 80) + "END")
+    chunks = core.chunk_file(str(source), chunk_size=350, chunk_overlap=60)
+    prepared = core.prepare_embedding_chunks(
+        chunks, filepath=str(source), project="project",
+        rel_path="symbols.txt", language="text",
+    )
+    texts = [core.build_embedding_text(
+        project="project", rel_path="symbols.txt", language="text",
+        symbols=chunk.get("symbols", []), code=chunk["chunk"],
+    ) for chunk in prepared]
+
+    assert core.EMBEDDING_MAX_CHARS <= 480
+    assert all(len(text) <= 480 for text in texts)
+    assert "END" in "".join(chunk["chunk"] for chunk in prepared)

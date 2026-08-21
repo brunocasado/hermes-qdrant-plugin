@@ -58,6 +58,20 @@ def record(collection: str, root: str, file_count: int) -> None:
     mutate(_record)
 
 
+def mark_schema_current(collection: str, root: str) -> None:
+    """Persist collection schema separately from index completion metadata."""
+    resolved = str(Path(root).resolve())
+
+    def _mark(reg: dict) -> None:
+        entry = reg.get(collection)
+        if not isinstance(entry, dict) or entry.get("root") != resolved:
+            entry = {"root": resolved}
+            reg[collection] = entry
+        entry["schema_version"] = INDEX_SCHEMA_VERSION
+
+    mutate(_mark)
+
+
 def remove(collection: str) -> bool:
     removed = False
 
