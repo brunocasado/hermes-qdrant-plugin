@@ -116,9 +116,7 @@ def register(ctx):
     # the gateway's RPC timeout, and the agent polls qdrant_status.
     def _start_index(directory, collection_name, chunk_size, chunk_overlap, reindex):
         root = _resolve(directory)
-        collection = (collection_name
-                      or registry.collection_for_root(root)
-                      or core.derive_collection_name(root))
+        collection = core.resolve_collection_name(root, requested=collection_name)
         with _index_ops_lock:
             op = _index_ops.get(root)
             if op and op["status"] == "running":
@@ -145,6 +143,10 @@ def register(ctx):
                     reindex=reindex,
                     on_progress=_progress,
                 ))
+                status = "done"
+            except core.IndexAlreadyRunning as exc:
+                message = (f"Index already running for '{exc.collection}' "
+                           f"(root: {exc.root}). Poll qdrant_status.")
                 status = "done"
             except Exception as exc:
                 message = f"index failed: {exc}"
@@ -199,8 +201,8 @@ def register(ctx):
             "properties": {
                 "directory": {"type": "string", "description": "Directory to index (default: session working dir)"},
                 "collection_name": {"type": "string", "description": "Collection name (auto: the project folder name, slugified, if omitted)"},
-                "chunk_size": {"type": "integer", "description": "Lines per chunk (default 10)"},
-                "chunk_overlap": {"type": "integer", "description": "Overlap in lines (default 3)"},
+                "chunk_size": {"type": "integer", "description": "Estimated tokens per chunk (default 350; final enriched input is hard-bounded)"},
+                "chunk_overlap": {"type": "integer", "description": "Estimated token overlap (default 60)"},
                 "reindex": {"type": "boolean", "description": "Force full re-index"},
             },
             "required": [],
@@ -220,28 +222,20 @@ def register(ctx):
             if reg:
                 return f"No collection for project '{root}'. Available collections: {', '.join(reg.keys())}"
             return f"No collection for project '{root}' and no collections indexed. Run qdrant_index first."
-        # Fetch more raw chunks than the requested file count so collapsing
-        # to per-file summaries doesn't lose file diversity.
-        fetch_limit = max(limit * 3, 15)
+        # Maximize recall internally, then return a narrow file shortlist.
+        fetch_limit = max(60, limit * 6)
         hits = await core.search_qdrant(collection, query, fetch_limit, min_score)
         if not hits:
             return f"No results for: '{query}'"
-        summaries = core.aggregate_hits_by_file(hits, top_chunks_per_file=1)
-        # Cap at `limit` files.
-        summaries = summaries[:limit]
-        out = len(summaries)
-        header = (f"Search results for: '{query}' (collection: {collection})\n"
-                  f"{out} file(s), {len(hits)} chunk(s) matched\n\n" + "=" * 80 + "\n\n")
-        output = header
-        for i, s in enumerate(summaries, 1):
-            output += f"--- {i}. {s['file']} (best score: {s['best_score']:.4f}, " \
-                      f"{s['chunk_count']} chunk(s), lines {s['line_start']}-{s['line_end']}) ---\n"
-            chunk = s["best_chunk"]
-            if len(chunk) > 800:
-                chunk = chunk[:800] + "..."
-            output += f"Content:\n{chunk}\n" + "-" * 40 + "\n\n"
-        output += f"Total: {out} file(s) (from {len(hits)} chunks)"
-        return output
+        summaries = core.aggregate_hits_by_file(hits, top_chunks_per_file=2, query=query)
+        summaries = summaries[:min(limit, 8)]
+        evidence = core.format_file_results(summaries, query)
+        return (
+            f"{evidence}\n\n"
+            f"Collection: {collection} · {len(hits)} internal chunk hit(s) · "
+            f"{len(summaries)} file candidate(s) returned\n"
+            "Read the returned real files before reasoning or editing; Qdrant is navigation evidence, not source of truth."
+        )
 
     async def qdrant_search(args, **kw):
         return await _do_search(
@@ -257,16 +251,16 @@ def register(ctx):
         schema={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Natural-language search query"},
+                "query": {"type": "string", "description": "Natural-language question, exact identifier, filename or path"},
                 "collection_name": {"type": "string", "description": "Omit to search the current project's collection"},
                 "limit": {"type": "integer", "default": 10},
-                "min_score": {"type": "number", "default": 0.0},
+                "min_score": {"type": "number", "default": 0.0, "description": "Dense cosine threshold before hybrid fusion; not applied to lexical/RRF scores"},
             },
             "required": ["query"],
         },
         handler=qdrant_search,
         is_async=True,
-        description="Semantic search over indexed project files.",
+        description="Return the top 5-8 project FILE candidates with symbols, line ranges and snippets. Read the returned real files before reasoning or editing; Qdrant is a discovery layer, not source of truth.",
         emoji="🔎",
     )
 
@@ -475,10 +469,6 @@ def register(ctx):
         name = kwargs.get("tool_name")
         if name not in EDIT_TOOLS:
             return
-        # Master switch off: the user disabled automatic indexing — skip
-        # silently (manual /qdrant index still works).
-        if not qconfig.is_enabled():
-            return
         args = kwargs.get("args") or {}
         path = args.get("path") or args.get("file_path") or ""
         if not path:
@@ -494,6 +484,9 @@ def register(ctx):
                 break
         if root is None:
             return
+        # Automatic indexing is opt-in for this containing project.
+        if not qconfig.is_enabled(root):
+            return
         now = time.monotonic()
         if now - _last_reindex.get(root, 0) < _DEBOUNCE_SECS:
             return
@@ -502,6 +495,8 @@ def register(ctx):
         def _bg():
             try:
                 asyncio.run(core.index_directory(root, collection_name=collection))
+            except core.IndexAlreadyRunning:
+                pass  # another entrypoint already owns this project's writer lock
             except Exception:
                 pass  # fire-and-forget; failures are logged by core
 
@@ -532,21 +527,24 @@ def register(ctx):
             if len(parts) < 2 or parts[1] not in _VALID_KEYS:
                 return f"Usage: /qdrant config get <key>  (keys: {', '.join(_VALID_KEYS)})"
             if parts[1] == "enabled":
-                return f"enabled = {str(qconfig.is_enabled()).lower()}"
+                root = _resolve("")
+                return f"enabled[{root}] = {str(qconfig.is_enabled(root)).lower()}"
             section, key = parts[1].split(".", 1)
             return f"{parts[1]} = {qconfig.load_config()[section][key]}"
         if act == "set":
             if len(parts) < 3 or parts[1] not in _VALID_KEYS:
                 return f"Usage: /qdrant config set <key> <value>  (keys: {', '.join(_VALID_KEYS)})"
             if parts[1] == "enabled":
+                root = _resolve("")
                 if parts[2] in ("on", "true", "1"):
-                    qconfig.save_config({"enabled": True})
+                    qconfig.set_enabled(root, True)
                 elif parts[2] in ("off", "false", "0"):
-                    qconfig.save_config({"enabled": False})
+                    qconfig.set_enabled(root, False)
                 else:
                     return "'enabled' must be on/off (or true/false, 1/0)"
-                return ("Automatic indexing " + ("enabled." if parts[2] in ("on", "true", "1") else "DISABLED.")
-                        + "\n\n" + qconfig.describe())
+                return ("Automatic indexing " +
+                        ("enabled" if parts[2] in ("on", "true", "1") else "disabled") +
+                        f" for {root}.\n\n" + qconfig.describe())
             section, key = parts[1].split(".", 1)
             value = parts[2]
             if parts[1] in _INT_KEYS:

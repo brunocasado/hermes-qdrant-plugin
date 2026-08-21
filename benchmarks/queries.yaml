@@ -1,0 +1,90 @@
+- project: self
+  query: Where is incremental indexing and Qdrant upsert implemented?
+  expected: [core.py]
+- project: self
+  query: Where are stale chunks for changed files deleted?
+  expected: [core.py]
+- project: self
+  query: Where are deleted filesystem files removed from Qdrant?
+  expected: [core.py]
+- project: self
+  query: Where is the clean reindex collection rebuild implemented?
+  expected: [core.py]
+- project: self
+  query: Where are dense and lexical vectors created for each point?
+  expected: [core.py]
+- project: self
+  query: Where is Reciprocal Rank Fusion implemented?
+  expected: [core.py]
+- project: self
+  query: Where is FollowUpAfter style identifier routing handled?
+  expected: [core.py]
+- project: self
+  query: Where is file-level multi-chunk ranking calculated?
+  expected: [core.py]
+- project: self
+  query: Where is navigation evidence formatted for Hermes?
+  expected: [core.py]
+- project: self
+  query: Where is augmented embedding text built from project path and symbols?
+  expected: [core.py]
+- project: self
+  query: Where is automatic indexing configured per project?
+  expected: [qconfig.py]
+- project: self
+  query: Where is the legacy global enabled flag migrated?
+  expected: [qconfig.py]
+- project: self
+  query: Where are Qdrant and embedding endpoint settings loaded?
+  expected: [qconfig.py]
+- project: self
+  query: Where is the collection-to-project registry persisted?
+  expected: [registry.py]
+- project: self
+  query: Where are registry updates made atomic across processes?
+  expected: [registry.py, index_lock.py]
+- project: self
+  query: Where is IndexAlreadyRunning defined?
+  expected: [index_lock.py]
+- project: self
+  query: Where are project root and collection writer locks acquired?
+  expected: [index_lock.py, core.py]
+- project: self
+  query: Where is atomic JSON replacement implemented?
+  expected: [index_lock.py]
+- project: self
+  query: Where is token-budgeted overlap chunking implemented?
+  expected: [chunking.py]
+- project: self
+  query: Where are oversized minified lines split safely?
+  expected: [chunking.py]
+- project: self
+  query: Where is Tree-sitter structural code parsing implemented?
+  expected: [structural.py]
+- project: self
+  query: Where are function and class symbols extracted?
+  expected: [structural.py]
+- project: self
+  query: Where are TOML and YAML configuration sections chunked?
+  expected: [structural.py]
+- project: self
+  query: Where are desktop REST routes for status refresh and reindex?
+  expected: [dashboard/plugin_api.py]
+- project: self
+  query: Where is the per-project enabled REST endpoint?
+  expected: [dashboard/plugin_api.py]
+- project: self
+  query: Where is the desktop statusbar pill rendered?
+  expected: [desktop/plugin.js]
+- project: self
+  query: Where does the pill remember automatic indexing for only the current project?
+  expected: [desktop/plugin.js]
+- project: self
+  query: Where are qdrant_index and qdrant_search tools registered?
+  expected: [__init__.py]
+- project: self
+  query: Where does the post-tool edit hook trigger automatic reindexing?
+  expected: [__init__.py]
+- project: self
+  query: Where is the qidx command line interface implemented?
+  expected: [qidx_cli.py]

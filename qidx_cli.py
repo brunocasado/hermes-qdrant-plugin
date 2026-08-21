@@ -37,13 +37,17 @@ def _resolve_dir(d: str) -> str:
 def cmd_index(a):
     root = _resolve_dir(a.directory)
     collection = a.collection or registry.collection_for_root(root)
-    out = asyncio.run(core.index_directory(
-        root,
-        collection_name=collection,
-        chunk_size=a.chunk_size or core.CHUNK_SIZE,
-        chunk_overlap=a.chunk_overlap or core.CHUNK_OVERLAP,
-        reindex=a.reindex,
-    ))
+    try:
+        out = asyncio.run(core.index_directory(
+            root,
+            collection_name=collection,
+            chunk_size=a.chunk_size or core.CHUNK_SIZE,
+            chunk_overlap=a.chunk_overlap or core.CHUNK_OVERLAP,
+            reindex=a.reindex,
+        ))
+    except core.IndexAlreadyRunning as exc:
+        owner = f" (pid {exc.owner.get('pid')})" if exc.owner.get("pid") else ""
+        raise SystemExit(f"Index already running for {exc.root}{owner}") from None
     print(out)
 
 
@@ -63,7 +67,8 @@ def cmd_status(a):
             lines.append(f"  {st['point_count']} points in Qdrant")
         lines.append(f"  ✓ {st['unchanged']} unchanged"
                      + (f", ~ {st['changed']} changed" if st["changed"] else "")
-                     + (f", + {st['new']} new" if st["new"] else ""))
+                     + (f", + {st['new']} new" if st["new"] else "")
+                     + (f", - {st.get('deleted', 0)} deleted" if st.get("deleted") else ""))
         lines.append("Status: STALE — run 'index' to refresh" if st["stale"] else "Status: FRESH")
     else:
         state = st.get("collection_state")
@@ -83,19 +88,16 @@ def cmd_search(a):
         avail = ", ".join(reg.keys()) if reg else "no collections indexed"
         sys.exit(f"No collection for '{root}'. Available: {avail}")
     query = " ".join(a.query) if isinstance(a.query, list) else a.query
-    fetch_limit = max(a.limit * 3, 15)
+    fetch_limit = max(60, a.limit * 6)
     hits = asyncio.run(core.search_qdrant(collection, query, fetch_limit, a.min_score))
     if not hits:
         print(f"No results for: '{query}'")
         return
-    summaries = core.aggregate_hits_by_file(hits, top_chunks_per_file=1)[:a.limit]
-    print(f"{len(summaries)} file(s), {len(hits)} chunk(s) matched\n")
-    for i, s in enumerate(summaries, 1):
-        print(f"--- {i}. {s['file']} (best {s['best_score']:.4f}, "
-              f"{s['chunk_count']} chunk(s), lines {s['line_start']}-{s['line_end']})")
-        for ln in s["best_chunk"].splitlines()[:30]:
-            print("    " + ln)
-        print()
+    summaries = core.aggregate_hits_by_file(
+        hits, top_chunks_per_file=2, query=query,
+    )[:min(a.limit, 8)]
+    print(core.format_file_results(summaries, query))
+    print(f"\nCollection: {collection} · {len(hits)} internal chunk hit(s)")
 
 
 def cmd_list(_a):
@@ -111,10 +113,7 @@ def cmd_list(_a):
 def cmd_delete(a):
     c = core.get_client()
     c.delete_collection(a.collection)
-    reg = registry.load()
-    if a.collection in reg:
-        del reg[a.collection]
-        registry.save(reg)
+    registry.remove(a.collection)
     print(f"Deleted collection '{a.collection}' (registry entry removed if present)")
 
 

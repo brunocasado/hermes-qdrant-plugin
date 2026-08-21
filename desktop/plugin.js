@@ -22,9 +22,8 @@
  * the previous project's green state).
  *
  * Click opens a details popover (collection, root, counts, last indexed) with a
- * "Reindex now" button (POST /reindex) and a ⚙️ Settings view with the
- * "Enable automatic indexing" master switch (PUT /config { enabled }) plus the
- * Qdrant server + embedding endpoint editor (GET/PUT /config, GET /config/test).
+ * "Reindex now" button (POST /reindex), a per-project automatic-index toggle
+ * (PUT /enabled), and a ⚙️ Settings view for the server + embedding endpoint.
  * Polls every 30s via useQuery. REST errors (backend down) degrade to the
  * dimmed state — never crash.
  */
@@ -154,7 +153,6 @@ export default {
       useEffect(() => {
         if (cfg && !form) {
           setForm({
-            enabled: cfg.enabled !== false,
             host: cfg.qdrant.host,
             port: String(cfg.qdrant.port),
             base_url: cfg.embedding.base_url,
@@ -222,7 +220,7 @@ export default {
       // but the live check downgraded it. Amber = attention + rebuildable
       // (distinct from dimmed = never indexed).
       const deleted = !!live && !live.indexed && (live.collection_state === 'missing' || live.collection_state === 'empty')
-      const n = live ? (live.changed || 0) + (live.new || 0) : 0
+      const n = live ? (live.changed || 0) + (live.new || 0) + (live.deleted || 0) : 0
       const count = live ? live.file_count : null
 
       const pillLabel = 'Index'
@@ -301,33 +299,22 @@ export default {
           .finally(() => setBusy(false))
       }
 
-      // Master switch — PUT /config { enabled } works standalone (no other
-      // keys), so the checkbox applies immediately without a Save click.
-      // The checkbox is controlled by form.enabled, and the config seed
-      // effect only runs while form === null — so a plain refetchCfg()
-      // never pushes the new value into the checkbox: it visually stayed on
-      // the OLD state until the pill remounted (reopening the popup in a
-      // fresh mount). Flip the form state optimistically on click and roll
-      // it back if the PUT fails.
+      // Project-scoped switch — status already carries the current root's
+      // value, so the control follows cwd without leaking state across projects.
       const toggleEnabled = (next) => {
         setEnBusy(true)
-        setForm((f) => (f ? { ...f, enabled: next } : f))
-        ctx.rest('/config', { method: 'PUT', body: { enabled: next } })
+        ctx.rest('/enabled?root=' + encodeURIComponent(cwd), { method: 'PUT', body: { enabled: next } })
           .then(() => {
-            refetchCfg()
             refetch()
             host.notify({
               kind: next ? 'success' : 'info',
-              title: next ? 'Qdrant indexing enabled' : 'Qdrant indexing disabled',
+              title: next ? 'Auto-indexing on for this project' : 'Auto-indexing off for this project',
               message: next
-                ? 'Automatic index refresh is back on.'
-                : 'No automatic indexing — use "Index now" to refresh manually.'
+                ? 'Changed files in this project will be indexed automatically.'
+                : 'Manual "Index now" still works for this project.'
             })
           })
-          .catch((e) => {
-            setForm((f) => (f ? { ...f, enabled: !next } : f))
-            host.notifyError(e, 'Qdrant: enable toggle failed')
-          })
+          .catch((e) => host.notifyError(e, 'Qdrant: project toggle failed'))
           .finally(() => setEnBusy(false))
       }
 
@@ -414,28 +401,6 @@ export default {
                           : jsxs('div', {
                               className: 'flex flex-col gap-3',
                               children: [
-                                // Master switch — applies on click (PUT /config
-                                // { enabled }), no Save needed.
-                                jsxs(
-                                  'label',
-                                  {
-                                    className: 'flex cursor-pointer items-center gap-2 rounded border border-(--ui-stroke-secondary) px-2 py-1.5',
-                                    children: [
-                                      jsx(Checkbox, {
-                                        checked: form.enabled,
-                                        disabled: enBusy,
-                                        onCheckedChange: (v) => toggleEnabled(v === true)
-                                      }),
-                                      jsxs('div', {
-                                        className: 'flex flex-col',
-                                        children: [
-                                          jsx('span', { className: 'text-[0.75rem] font-medium', children: 'Enable automatic indexing' }),
-                                          jsx('span', { className: 'text-[0.625rem] text-muted-foreground', children: 'Refresh the index after edits; manual "Index now" always works' })
-                                        ]
-                                      })
-                                    ]
-                                  }
-                                ),
                                 jsxs('div', {
                                   className: 'flex flex-col gap-2',
                                   children: [
@@ -543,6 +508,23 @@ export default {
                               ]
                             })
                           : null,
+                        jsxs('label', {
+                          className: 'flex cursor-pointer items-center gap-2 rounded border border-(--ui-stroke-secondary) px-2 py-1.5',
+                          children: [
+                            jsx(Checkbox, {
+                              checked: !!live && live.enabled,
+                              disabled: !live || enBusy || transitioning,
+                              onCheckedChange: (v) => toggleEnabled(v === true)
+                            }),
+                            jsxs('div', {
+                              className: 'flex flex-col',
+                              children: [
+                                jsx('span', { className: 'text-[0.75rem] font-medium', children: 'Enable automatic indexing' }),
+                                jsx('span', { className: 'text-[0.625rem] text-muted-foreground', children: 'Applies to this project only — remembered per project' })
+                              ]
+                            })
+                          ]
+                        }),
                         jsxs(
                           'div',
                           {

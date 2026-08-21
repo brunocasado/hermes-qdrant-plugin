@@ -1,22 +1,39 @@
 # hermes-qdrant-plugin
 
-Hermes Agent plugin: semantic index of your project files in [Qdrant](https://qdrant.tech), with agent tools, auto-reindex hooks, and a desktop statusbar pill.
+Hermes Agent plugin that uses Qdrant as a **project file-discovery layer**. It retrieves a small set of likely files; Hermes then reads the real files and reasons from the actual source code.
+
+```text
+question → dense + lexical retrieval → file aggregation → top 5–8 files → Hermes reads real files
+```
 
 ## What it does
 
-- **`qdrant_index <path>`** — chunks a project directory, embeds the chunks (any OpenAI-compatible embeddings endpoint), and upserts them into a Qdrant collection named after the project.
-- **`qdrant_search <query>`** — semantic search across all indexed projects (or one collection).
-- **`qdrant_status`** / **`qdrant_list_collections`** / **`qdrant_delete_collection`** — inspect and manage collections.
-- **`qdrant_set_server`** — repoint the plugin at a different Qdrant server or embedding endpoint at runtime (persisted to the per-plugin data dir).
-- **Auto-reindex hook** — after file-mutating tool calls, changed files are re-indexed incrementally (hash-cache based, idempotent, deterministic point IDs).
-- **Desktop pill** — statusbar indicator with a popover: per-collection status, progress during indexing, settings (master switch for auto-indexing), and manual "Index now" / "Reindex".
+- **`qdrant_index <path>`** — incrementally indexes a project; `reindex=true` performs a clean collection rebuild.
+- **`qdrant_search <query>`** — returns file candidates with score, symbols, best line range and a short snippet.
+- **`qdrant_status`**, **`qdrant_list_collections`**, **`qdrant_delete_collection`** — inspect/manage collections.
+- **`qdrant_set_server`** — changes Qdrant or the OpenAI-compatible embedding endpoint at runtime.
+- **Auto-index hook** — opt-in **per project**, disabled by default. Manual Index/Reindex always remains available.
+- **Desktop pill** — shows focused-project status/progress and remembers its auto-index toggle independently from other projects.
+
+## Retrieval architecture
+
+1. Files are keyed by `rel_path`; stale points are deleted before changed files are upserted, and deleted files are purged.
+2. Python uses stdlib AST structural chunks; JS/TS, Go, Rust and Java use official Tree-sitter bindings. Unsupported/worker-thread paths fall back safely to token-budgeted chunks.
+3. Final enriched embedding inputs are hard-bounded for a 512-token-class model; content is split, never silently truncated.
+4. Embedding text includes project, relative path, language, symbols and raw code.
+5. Each point stores `rel_path`, basename, language, symbols, chunk type, line range and file hash.
+6. Qdrant stores named `dense` and `lexical` sparse vectors.
+7. Exact identifiers/path-like queries prefer lexical search; natural-language questions prefer dense; mixed queries combine both with Reciprocal Rank Fusion.
+8. Internal retrieval is broad (at least 60 chunks); output is narrow (at most 8 files), ranked with multi-chunk, symbol and path evidence.
+
+Qdrant is navigation evidence, not source of truth. Consumers should read returned files before reasoning or editing.
 
 ## Requirements
 
 - Hermes Agent (desktop or CLI)
-- A Qdrant server (default `localhost:6333`)
-- An OpenAI-compatible embeddings endpoint (default `http://localhost:8080/v1`, model `embeddings`, 768-dim — e.g. a local llama-swap/LiteLLM gateway; any compatible API works)
-- Python deps (declared in `plugin.yaml`): `qdrant-client>=1.7,<2`, `httpx>=0.27,<1`
+- Qdrant (default `localhost:6333`)
+- OpenAI-compatible embeddings endpoint (default `http://localhost:8080/v1`, model `embeddings`, dimension 768)
+- Python dependencies are declared in `plugin.yaml` and installed by Hermes.
 
 ## Install
 
@@ -24,48 +41,66 @@ Hermes Agent plugin: semantic index of your project files in [Qdrant](https://qd
 hermes plugins install brunocasado/hermes-qdrant-plugin
 ```
 
-or clone into `~/.hermes/plugins/hermes-qdrant-plugin` and restart Hermes.
+Or clone into `~/.hermes/plugins/hermes-qdrant-plugin`. After install/update or route changes, fully quit Hermes and relaunch it so desktop REST routes are mounted.
 
 ## Configure
 
-Precedence (highest first): environment variables → `config.json` (in the per-plugin data dir) → built-in defaults.
+Precedence: environment variables → per-plugin `config.json` → built-in defaults.
 
 | Env var | Config key | Meaning |
 |---|---|---|
-| `QDRANT_HOST` | `qdrant.host` | Qdrant server host |
-| `QDRANT_PORT` | `qdrant.port` | Qdrant server port (default 6333) |
-| `EMBEDDING_BASE_URL` | `embedding.base_url` | OpenAI-compatible embeddings base URL |
-| `EMBEDDING_MODEL` | `embedding.model` | Embedding model name |
-| `EMBEDDING_API_KEY` | `embedding.api_key` | API key (`EMPTY` for unauthenticated local servers) |
-| `EMBEDDING_VECTOR_DIM` | `embedding.vector_dim` | Vector dimension (must match the model) |
+| `QDRANT_HOST` | `qdrant.host` | Qdrant host |
+| `QDRANT_PORT` | `qdrant.port` | Qdrant port |
+| `EMBEDDING_BASE_URL` | `embedding.base_url` | OpenAI-compatible base URL |
+| `EMBEDDING_MODEL` | `embedding.model` | Embedding model |
+| `EMBEDDING_API_KEY` | `embedding.api_key` | API key (`EMPTY` for unauthenticated local endpoints) |
+| `EMBEDDING_VECTOR_DIM` | `embedding.vector_dim` | Vector dimension |
 
-Or use the CLI / agent tool:
+Auto-indexing is configured per project from the desktop pill or `/qdrant config set enabled on|off` while that project is focused. New projects default to off.
+
+## State and concurrency
+
+Durable state lives under `<hermes home>/plugin-data/hermes-qdrant-plugin/`, outside the install tree.
+
+- Cross-process root + collection locks guarantee one active writer per project/collection across REST, agent tools, hooks and CLI.
+- Shared config, registry and hash-cache updates use short metadata locks and atomic JSON replacement.
+- Different projects/collections may still index concurrently.
+- Same-basename projects receive stable disambiguated collection names; explicit conflicting names are rejected.
+
+## Upgrade note
+
+The current schema uses relative-path point IDs plus named dense/sparse vectors. Collections created by older versions require one clean rebuild:
 
 ```bash
-qidx config set embedding.base_url http://your-host:4000/v1
-qidx config set qdrant.host 10.0.0.5
-qidx status
+python3 qidx_cli.py index /path/to/project --reindex
 ```
-
-## State
-
-All durable state (config, registry, hash cache) lives in the sanctioned per-plugin data root — `<hermes home>/plugin-data/hermes-qdrant-plugin/` — so it survives `hermes plugins update` and `hermes plugins remove`. Older versions that parked state inside the install tree (`<install dir>/data/`) are migrated automatically on first run.
 
 ## CLI
 
-`qidx_cli.py` (`qidx`) — `status`, `index <path>`, `search <query>`, `config [set key value]`, `list`, `delete <collection>`.
+```bash
+python3 qidx_cli.py status /path/to/project
+python3 qidx_cli.py index /path/to/project
+python3 qidx_cli.py search where is campaign scheduling handled --collection project-name
+python3 qidx_cli.py config show
+python3 qidx_cli.py list
+```
 
-## Tests
+## Tests and benchmark
 
 ```bash
 python3 -m pytest tests/ -q
+node --check desktop/plugin.js
+python3 benchmarks/run_benchmark.py
 ```
+
+`benchmarks/queries.yaml` contains 30 manually-labelled discovery questions. The runner records Recall@1, Recall@3, Recall@5 and MRR in `benchmarks/RESULTS.md`; Recall@5 is the primary metric.
 
 ## Notes
 
-- Point IDs are deterministic (`md5(file:chunk_index)`), so re-indexing is idempotent.
-- If a collection is deleted externally, the next status check detects it (live `count()` with a 30 s TTL cache) and the next index run rebuilds it from scratch.
-- Per-machine state is never published (see `.gitignore`).
+- Point IDs are deterministic from `rel_path:chunk_index`.
+- Out-of-band collection deletion is detected by a live Qdrant count with a short TTL cache.
+- Legacy install-tree state is excluded from indexing and remains available for migration.
+- Per-machine state and credentials are never published (see `.gitignore`).
 
 ## License
 

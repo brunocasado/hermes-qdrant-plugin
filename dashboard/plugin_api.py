@@ -76,7 +76,8 @@ def get_status(root: str = ""):
     if not ok:
         return {"indexable": False, "reason": reason, "indexed": False, "stale": False,
                 "file_count": 0, "changed": 0, "new": 0, "total": 0, "reindexing": False,
-                "enabled": _qconfig().is_enabled()}
+                "deleted": 0,
+                "enabled": _qconfig().is_enabled(root)}
     core, registry = _core()
     collection = registry.collection_for_root(root)
     cache = core.load_hash_cache(collection) if collection else {}
@@ -97,9 +98,8 @@ def get_status(root: str = ""):
         st["reindexing"] = op["status"] == "running"
     else:
         st["reindexing"] = False
-    # Master switch — the desktop pill shows a "disabled" state (and skips
-    # automatic /refresh) when the user has turned indexing off.
-    st["enabled"] = _qconfig().is_enabled()
+    # Project switch — the pill reflects the focused project's preference.
+    st["enabled"] = _qconfig().is_enabled(root)
     return st
 
 
@@ -118,9 +118,12 @@ def post_reindex(root: str = "", collection: str = ""):
     # Known project -> existing collection; unknown -> derive from the
     # folder name so the button can index a brand-new project, not just
     # reindex a registered one.
-    collection = collection or registry.collection_for_root(root) or core.derive_collection_name(root)
+    collection = core.resolve_collection_name(root, requested=collection or None)
 
     with _OPS_LOCK:
+        op = _OPS.get(root)
+        if op and op["status"] == "running":
+            return {"started": False, "reason": "already-running", "collection": collection}
         _OPS[root] = {"status": "running", "collection": collection, "at": time.time()}
 
     def _bg():
@@ -139,6 +142,8 @@ def post_reindex(root: str = "", collection: str = ""):
                 core.index_directory(root, collection_name=collection, reindex=True,
                                      on_progress=_progress)
             )
+        except core.IndexAlreadyRunning as exc:
+            message = f"index already running for {exc.root}"
         except Exception as exc:
             message = f"reindex failed: {exc}"
         with _OPS_LOCK:
@@ -160,16 +165,15 @@ def post_refresh(root: str = ""):
     a never-indexed project shows its own state — never the previous
     project's. Only changed/new files are re-embedded, so switching back
     and forth is cheap."""
-    core, registry = _core()
     root = str(Path(root).expanduser().resolve()) if root else str(Path.cwd())
-    # Automatic refresh is the master switch's domain: when the user turned
-    # indexing off, don't index on focus-change. (Explicit /reindex still works.)
-    if not _qconfig().is_enabled():
+    # Automatic refresh is project-scoped. Explicit /reindex still works.
+    if not _qconfig().is_enabled(root):
         return {"started": False, "reason": "disabled", "enabled": False}
+    core, registry = _core()
     ok, reason = _is_indexable(root)
     if not ok:
         return {"started": False, "reason": reason}
-    collection = registry.collection_for_root(root) or core.derive_collection_name(root)
+    collection = core.resolve_collection_name(root)
 
     with _OPS_LOCK:
         op = _OPS.get(root)
@@ -182,6 +186,8 @@ def post_refresh(root: str = ""):
             # reindex=False: incremental — only changed/new files are
             # re-embedded. First-ever index of a project is naturally full.
             message = asyncio.run(core.index_directory(root, collection_name=collection))
+        except core.IndexAlreadyRunning as exc:
+            message = f"index already running for {exc.root}"
         except Exception as exc:
             message = f"refresh failed: {exc}"
         with _OPS_LOCK:
@@ -203,6 +209,22 @@ def _qconfig():
         sys.path.insert(0, str(base))
     import qconfig
     return qconfig
+
+
+@router.get("/enabled")
+def get_enabled(root: str = ""):
+    """Return automatic-index state for one project root."""
+    root = str(Path(root).expanduser().resolve()) if root else str(Path.cwd())
+    return {"root": root, "enabled": _qconfig().is_enabled(root)}
+
+
+@router.put("/enabled")
+def put_enabled(root: str = "", body: dict | None = None):
+    """Persist automatic-index state for one project root."""
+    root = str(Path(root).expanduser().resolve()) if root else str(Path.cwd())
+    value = bool((body or {}).get("enabled", False))
+    _qconfig().set_enabled(root, value)
+    return {"root": root, "enabled": value}
 
 
 _VALID_KEYS = {

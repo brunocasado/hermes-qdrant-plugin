@@ -30,16 +30,26 @@ logger = logging.getLogger(__name__)
 # change needed. Precedence: env var > data/config.json > built-in defaults.
 # Edit with `qidx config set <key> <value>` or the qdrant_set_server tool.
 # See qconfig.py for the full shape and the env-var names.
-CHUNK_SIZE = 10  # Lines per chunk - API has ~512 token limit per request
-CHUNK_OVERLAP = 3
+CHUNK_SIZE = 350  # estimated tokens per chunk (metadata must also fit 512)
+CHUNK_OVERLAP = 60  # estimated token overlap
+EMBEDDING_MAX_CHARS = 900  # observed-safe ceiling for the local 512-token model
 
 # Dual-mode import (plugin package vs plugin-dir-on-sys.path):
 try:
     from . import registry as _registry
     from . import qconfig as _qconfig
+    from . import index_lock as _index_lock
+    from .chunking import estimate_tokens, token_chunks_file, token_chunks_from_text
+    from .structural import structural_chunks
 except ImportError:
     import registry as _registry
     import qconfig as _qconfig
+    import index_lock as _index_lock
+    from chunking import estimate_tokens, token_chunks_file, token_chunks_from_text
+    from structural import structural_chunks
+
+IndexAlreadyRunning = _index_lock.IndexAlreadyRunning
+INDEX_SCHEMA_VERSION = _registry.INDEX_SCHEMA_VERSION
 
 # --- Data dir ---
 # Sanctioned per-plugin state root (see paths.py) — survives plugin
@@ -147,7 +157,7 @@ async def get_embeddings(texts: list[str]) -> list[list[float]]:
 
 
 # --- File Discovery ---
-SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".idea", ".vscode", "dist", "build", ".next", ".nuxt", ".output", ".cache", "vendor", "target", "out", "bin", "obj", ".hermes"}
+SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".idea", ".vscode", "dist", "build", ".next", ".nuxt", ".output", ".cache", "vendor", "target", "out", "bin", "obj", ".hermes", "benchmarks"}
 SKIP_EXTS = {".lock", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".map", ".pt", ".pth", ".bin", ".so", ".dylib", ".dll", ".exe", ".pyc", ".pyo", ".DS_Store"}
 INDEXABLE_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs",
@@ -178,6 +188,12 @@ def discover_files(directory: str, max_files: int = MAX_DISCOVER_FILES) -> list[
     state_files: set[str] = set()
     if DATA_DIR.exists():
         state_files = {str(p) for p in DATA_DIR.iterdir() if p.is_file()}
+    # Backward-compatible install-tree state from pre-plugin-data versions.
+    # Exclude this plugin's exact legacy directory even when indexing a parent
+    # such as ~/.hermes/plugins; do not globally skip arbitrary project data/.
+    legacy_data = Path(__file__).resolve().parent / "data"
+    if legacy_data.exists():
+        state_files.update(str(p) for p in legacy_data.iterdir() if p.is_file())
     files = []
     for root, dirs, filenames in os.walk(dir_path):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
@@ -193,40 +209,9 @@ def discover_files(directory: str, max_files: int = MAX_DISCOVER_FILES) -> list[
 
 # --- Chunking ---
 def chunk_file(filepath: str, chunk_size: int = CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP) -> list[dict]:
-    """Chunk a single file into overlapping segments.
-
-    Each chunk is truncated to ~450 chars to stay under the 512 token limit.
-    """
-    try:
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-    except Exception:
-        return []
-
-    lines = content.split("\n")
-    chunks = []
-    start = 0
-    line_num = 1
-
-    while start < len(lines):
-        end = min(start + chunk_size, len(lines))
-        if end > start:
-            chunk_text = "\n".join(lines[start:end])
-            # Truncate to ~450 chars to stay under 512 token limit
-            if len(chunk_text) > 450:
-                chunk_text = chunk_text[:450]
-            chunks.append({
-                "file": filepath,
-                "chunk": chunk_text,
-                "line_start": line_num + start,
-                "line_end": line_num + end - 1,
-                "chunk_index": len(chunks),
-            })
-        start += chunk_size - chunk_overlap
-        if chunk_size <= chunk_overlap:
-            break
-
-    return chunks
+    """Prefer semantic units; fall back to token-budgeted overlapping chunks."""
+    structured = structural_chunks(filepath, chunk_size, chunk_overlap)
+    return structured or token_chunks_file(filepath, chunk_size, chunk_overlap)
 
 
 # --- Collection naming ---
@@ -247,6 +232,31 @@ def derive_collection_name(directory: str) -> str:
     return "ws-" + hashlib.md5(str(directory).encode()).hexdigest()[:16]
 
 
+class CollectionNameConflict(ValueError):
+    """An explicit collection belongs to a different project root."""
+
+
+def resolve_collection_name(root: str, requested: str | None = None) -> str:
+    """Resolve a stable collection without mixing same-basename projects."""
+    root = str(Path(root).expanduser().resolve())
+    existing = _registry.collection_for_root(root)
+    if requested:
+        owner = _registry.root_for_collection(requested)
+        if owner and str(Path(owner).resolve()) != root:
+            raise CollectionNameConflict(
+                f"Collection '{requested}' belongs to {owner}, not {root}"
+            )
+        return requested
+    if existing:
+        return existing
+    base = derive_collection_name(root)
+    owner = _registry.root_for_collection(base)
+    if not owner or str(Path(owner).resolve()) == root:
+        return base
+    suffix = hashlib.sha256(root.encode()).hexdigest()[:8]
+    return f"{base}-{suffix}"
+
+
 # --- Indexing ---
 def load_hash_cache(collection_name: str) -> dict[str, dict[str, int]]:
     """Load the SHA-256 hash cache for a collection."""
@@ -264,16 +274,17 @@ def load_hash_cache(collection_name: str) -> dict[str, dict[str, int]]:
 
 
 def save_hash_cache(collection_name: str, cache: dict[str, dict[str, int]]):
-    """Save the SHA-256 hash cache for a collection."""
+    """Atomically merge one collection checkpoint into the shared cache."""
     cache_path = HASH_CACHE_PATH
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    full_cache = {}
-    if cache_path.exists():
-        with open(cache_path, "r") as f:
-            full_cache = json.load(f)
-    full_cache[collection_name] = cache
-    with open(cache_path, "w") as f:
-        json.dump(full_cache, f, indent=2)
+    with _index_lock.metadata_lock("hash-cache"):
+        full_cache = {}
+        if cache_path.exists():
+            try:
+                full_cache = json.loads(cache_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                full_cache = {}
+        full_cache[collection_name] = cache
+        _index_lock.atomic_write_json(cache_path, full_cache)
 
 
 def file_hash(path: str) -> str:
@@ -350,20 +361,23 @@ def compute_status(root: str, *, cache: dict, registry: dict, collection: str | 
         # No known collection for this root — cheap bounded count, never a full walk
         return {"indexed": False, "collection": None, "root": str(Path(root).resolve()),
                 "total": len(discover_files(root, max_files=2000)), "unchanged": 0, "changed": 0,
-                "new": 0, "stale": False, "last_indexed": None}
+                "new": 0, "deleted": 0, "stale": False, "last_indexed": None}
     files = discover_files(root)
     unchanged = changed = new = 0
+    current_rel_paths = set()
     for fp in files:
         rel = str(Path(fp).relative_to(Path(root).resolve()))
+        current_rel_paths.add(rel)
         if rel not in cache:
             new += 1
         elif cache[rel].get("hash") == file_hash(fp):
             unchanged += 1
         else:
             changed += 1
+    deleted = len(set(cache) - current_rel_paths)
     st = {"indexed": True, "collection": collection, "root": entry["root"],
           "total": len(files), "unchanged": unchanged, "changed": changed,
-          "new": new, "stale": (changed + new) > 0,
+          "new": new, "deleted": deleted, "stale": (changed + new + deleted) > 0,
           "last_indexed": entry.get("last_indexed"), "file_count": entry.get("file_count")}
     if client is not None:
         state, n = live_collection_state(client, collection)
@@ -381,13 +395,114 @@ def compute_status(root: str, *, cache: dict, registry: dict, collection: str | 
     return st
 
 
-def _file_point_id(chunk: dict) -> str:
-    """Deterministic point id for a chunk — upserts are idempotent, so
-    re-processing a file (resume) never creates duplicates."""
-    return hashlib.md5(f"{chunk['file']}:{chunk['chunk_index']}".encode()).hexdigest()[:32]
+def detect_language(filepath: str) -> str:
+    ext = Path(filepath).suffix.lower()
+    return {
+        ".py": "python", ".js": "javascript", ".jsx": "javascript",
+        ".ts": "typescript", ".tsx": "typescript", ".go": "go",
+        ".rs": "rust", ".java": "java", ".kt": "kotlin", ".cs": "csharp",
+        ".rb": "ruby", ".php": "php", ".swift": "swift", ".sql": "sql",
+        ".graphql": "graphql", ".yaml": "yaml", ".yml": "yaml",
+        ".json": "json", ".toml": "toml", ".md": "markdown",
+    }.get(ext, ext.lstrip(".") or "text")
+
+
+def build_point_payload(*, root: str, filepath: str, chunk: str,
+                        line_start: int, line_end: int, chunk_index: int,
+                        file_hash: str, language: str | None = None,
+                        symbols: list[str] | None = None,
+                        chunk_type: str = "other") -> dict:
+    absolute = str(Path(filepath).resolve())
+    rel_path = str(Path(absolute).relative_to(Path(root).resolve()))
+    return {
+        "file": absolute,  # backward compatibility for current consumers
+        "rel_path": rel_path,
+        "basename": Path(rel_path).name,
+        "language": language or detect_language(absolute),
+        "symbols": symbols or [],
+        "chunk_type": chunk_type,
+        "chunk": chunk,
+        "line_start": line_start,
+        "line_end": line_end,
+        "chunk_index": chunk_index,
+        "file_hash": file_hash,
+    }
+
+
+def build_embedding_text(*, project: str, rel_path: str, language: str,
+                         symbols: list[str], code: str) -> str:
+    """Augment raw code with project navigation metadata."""
+    return (
+        f"project: {project}\n"
+        f"path: {rel_path}\n"
+        f"language: {language}\n"
+        f"symbols: {', '.join(symbols)}\n"
+        f"code:\n{code}"
+    )
+
+
+def prepare_embedding_chunks(chunks: list[dict], *, filepath: str, project: str,
+                             rel_path: str, language: str) -> list[dict]:
+    """Re-split enriched inputs that exceed the model-safe hard ceiling."""
+    prepared = []
+    for chunk in chunks:
+        symbols = chunk.get("symbols", [])
+        enriched = build_embedding_text(
+            project=project, rel_path=rel_path, language=language,
+            symbols=symbols, code=chunk["chunk"],
+        )
+        if len(enriched) <= EMBEDDING_MAX_CHARS:
+            prepared.append(dict(chunk))
+            continue
+        prefix = build_embedding_text(
+            project=project, rel_path=rel_path, language=language,
+            symbols=symbols, code="",
+        )
+        available_chars = max(100, EMBEDDING_MAX_CHARS - len(prefix))
+        split_tokens = max(50, available_chars // 2)
+        prepared.extend(token_chunks_from_text(
+            chunk["chunk"], filepath=filepath, chunk_tokens=split_tokens,
+            overlap_tokens=min(40, split_tokens - 1),
+            base_line=chunk.get("line_start", 1),
+            chunk_type=chunk.get("chunk_type", "text"), symbols=symbols,
+        ))
+    for index, chunk in enumerate(prepared):
+        chunk["chunk_index"] = index
+    return prepared
+
+
+def _file_point_id(rel_path: str, chunk_index: int) -> str:
+    """Portable deterministic id based on the canonical relative path."""
+    return hashlib.md5(f"{rel_path}:{chunk_index}".encode()).hexdigest()[:32]
 
 
 async def index_directory(
+    directory: str,
+    collection_name: Optional[str] = None,
+    chunk_size: int = CHUNK_SIZE,
+    chunk_overlap: int = CHUNK_OVERLAP,
+    reindex: bool = False,
+    on_progress: Optional[callable] = None,
+) -> str:
+    """Single admission boundary for every index writer.
+
+    REST, tools, hooks and CLI all call this function. The cross-process root
+    and collection locks therefore cover the complete mutation transaction.
+    """
+    root = str(Path(directory).expanduser().resolve())
+    collection = resolve_collection_name(root, requested=collection_name)
+    with _index_lock.index_operation_lock(root, collection):
+        return await _index_directory_locked(
+            root,
+            collection_name=collection,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            reindex=reindex,
+            on_progress=on_progress,
+        )
+
+
+async def _index_directory_locked(
     directory: str,
     collection_name: Optional[str] = None,
     chunk_size: int = CHUNK_SIZE,
@@ -407,6 +522,7 @@ async def index_directory(
     ``on_progress(files_done, files_total)`` is invoked after each file is
     checkpointed, so callers can surface live progress.
     """
+    from qdrant_client import models
     from qdrant_client.models import VectorParams, Distance, PointStruct
 
     c = get_client()
@@ -419,6 +535,15 @@ async def index_directory(
     if collection_name is None:
         collection_name = derive_collection_name(str(dir_path))
 
+    # Collections created before named dense+sparse vectors cannot accept the
+    # new point shape. Upgrade registered legacy collections once, under the
+    # same root+collection writer lock as every other mutation.
+    registered = _registry.load().get(collection_name)
+    if (isinstance(registered, dict)
+            and registered.get("root") == str(dir_path)
+            and int(registered.get("schema_version", 0)) < INDEX_SCHEMA_VERSION):
+        reindex = True
+
     # Ensure collection exists, and learn whether it actually holds points.
     # The hash cache is a *cache of Qdrant's state* — if the user deleted the
     # collection (or it's empty) out-of-band, the cache still claims every
@@ -426,16 +551,32 @@ async def index_directory(
     # the whole index is gone and must be rebuilt, regardless of the cache.
     # We're about to mutate points, so force a fresh server read — a cached
     # count from the last /status would be stale the moment we upsert.
-    live_state, live_count = live_collection_state(c, collection_name, force=True)
-    if live_state == "missing":
+    if reindex:
+        try:
+            c.delete_collection(collection_name)
+        except Exception:
+            pass
         c.create_collection(
             collection_name=collection_name,
-            vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE),
+            vectors_config={"dense": VectorParams(size=vector_dim, distance=Distance.COSINE)},
+            sparse_vectors_config={
+                "lexical": models.SparseVectorParams(modifier=models.Modifier.IDF)
+            },
         )
-        # The forced read above cached "missing" — the collection now exists,
-        # so clear it before any /status can read the stale entry.
         invalidate_live_state(collection_name)
         live_state, live_count = "empty", 0
+    else:
+        live_state, live_count = live_collection_state(c, collection_name, force=True)
+        if live_state == "missing":
+            c.create_collection(
+                collection_name=collection_name,
+                vectors_config={"dense": VectorParams(size=vector_dim, distance=Distance.COSINE)},
+                sparse_vectors_config={
+                    "lexical": models.SparseVectorParams(modifier=models.Modifier.IDF)
+                },
+            )
+            invalidate_live_state(collection_name)
+            live_state, live_count = "empty", 0
 
     # Load hash cache
     hash_cache = load_hash_cache(collection_name)
@@ -444,12 +585,28 @@ async def index_directory(
     files = discover_files(str(dir_path))
     logger.info(f"Discovered {len(files)} files in {directory}")
 
+    current_rel_paths = {
+        str(Path(filepath).relative_to(dir_path)) for filepath in files
+    }
+    deleted_rel_paths = set(hash_cache) - current_rel_paths
+    for rel_path in sorted(deleted_rel_paths):
+        selector = models.FilterSelector(filter=models.Filter(must=[
+            models.FieldCondition(
+                key="rel_path", match=models.MatchValue(value=rel_path)
+            )
+        ]))
+        c.delete(collection_name=collection_name, points_selector=selector, wait=True)
+        hash_cache.pop(rel_path, None)
+    if deleted_rel_paths:
+        save_hash_cache(collection_name, hash_cache)
+
     # Filter files that need indexing. An empty/missing live collection means
     # the hash cache describes points that no longer exist — treat it exactly
     # like a forced reindex (everything is new), otherwise the run below would
     # find "no new files" and return without uploading a single point.
     force_all = reindex or live_state != "ok"
     new_files = []
+    changed_rel_paths = set()
     for filepath in files:
         rel_path = str(Path(filepath).relative_to(dir_path))
         if force_all:
@@ -459,6 +616,7 @@ async def index_directory(
         else:
             if file_hash(filepath) != hash_cache[rel_path].get("hash", ""):
                 new_files.append(filepath)
+                changed_rel_paths.add(rel_path)
 
     if not new_files:
         _registry.record(collection_name, str(dir_path), len(files))
@@ -484,10 +642,22 @@ async def index_directory(
 
     async def process_file(filepath: str) -> int:
         nonlocal files_done, points_written
+        rel_path = str(Path(filepath).relative_to(dir_path))
+        if rel_path in changed_rel_paths:
+            selector = models.FilterSelector(filter=models.Filter(must=[
+                models.FieldCondition(
+                    key="rel_path", match=models.MatchValue(value=rel_path)
+                )
+            ]))
+            c.delete(collection_name=collection_name, points_selector=selector, wait=True)
         chunks = chunk_file(str(filepath), chunk_size, chunk_overlap)
+        language = detect_language(str(filepath))
+        chunks = prepare_embedding_chunks(
+            chunks, filepath=str(filepath), project=dir_path.name,
+            rel_path=rel_path, language=language,
+        )
         if not chunks:
             # Unreadable/empty file — checkpoint it so it isn't retried every run.
-            rel_path = str(Path(filepath).relative_to(dir_path))
             async with progress_lock:
                 hash_cache[rel_path] = {"hash": file_hash(filepath)}
                 save_hash_cache(collection_name, hash_cache)
@@ -500,28 +670,33 @@ async def index_directory(
         # file). Do NOT acquire `semaphore` here: _embed_batch already holds
         # it, and asyncio.Semaphore is not re-entrant — double acquisition
         # deadlocks the 3rd in-flight file.
-        texts = [ch["chunk"] for ch in chunks]
+        texts = [build_embedding_text(
+            project=dir_path.name,
+            rel_path=rel_path,
+            language=language,
+            symbols=ch.get("symbols", []),
+            code=ch["chunk"],
+        ) for ch in chunks]
         embeddings: list[list[float]] = []
         for i in range(0, len(texts), 200):
             embeddings.extend(await _embed_batch(texts[i : i + 200], emb_cfg, semaphore))
 
         # Build points (deterministic ids — idempotent on resume).
         fh = file_hash(filepath)
-        points = [
-            PointStruct(
-                id=_file_point_id(ch),
-                vector=embeddings[i],
-                payload={
-                    "file": ch["file"],
-                    "chunk": ch["chunk"],
-                    "line_start": ch["line_start"],
-                    "line_end": ch["line_end"],
-                    "chunk_index": ch["chunk_index"],
-                    "file_hash": fh,
-                },
+        points = []
+        for i, ch in enumerate(chunks):
+            payload = build_point_payload(
+                root=str(dir_path), filepath=str(filepath), chunk=ch["chunk"],
+                line_start=ch["line_start"], line_end=ch["line_end"],
+                chunk_index=ch["chunk_index"], file_hash=fh,
+                language=language, symbols=ch.get("symbols", []),
+                chunk_type=ch.get("chunk_type", "text"),
             )
-            for i, ch in enumerate(chunks)
-        ]
+            points.append(PointStruct(
+                id=_file_point_id(payload["rel_path"], payload["chunk_index"]),
+                vector={"dense": embeddings[i], "lexical": sparse_vector(texts[i])},
+                payload=payload,
+            ))
 
         # Upsert in batches of 100 — points land in Qdrant as soon as this
         # file's embeddings are ready (the whole point of the pipeline).
@@ -530,7 +705,6 @@ async def index_directory(
 
         # Checkpoint: only after the points are in Qdrant. If we die before
         # this line, the next run re-embeds + re-upserts this file (idempotent).
-        rel_path = str(Path(filepath).relative_to(dir_path))
         async with progress_lock:
             hash_cache[rel_path] = {"hash": fh}
             save_hash_cache(collection_name, hash_cache)
@@ -555,81 +729,181 @@ async def index_directory(
 
 
 # --- Search ---
+@dataclass
+class RetrievedHit:
+    id: object
+    score: float
+    payload: dict
+
+
 async def search_qdrant(
     collection_name: str,
     query: str,
     limit: int = 10,
     min_score: float = 0.0,
 ) -> list:
-    """Search Qdrant using OpenAI-compatible embedding API."""
-    c = get_client()
+    """Route dense/lexical retrieval and combine mixed queries with RRF."""
+    client = get_client()
+    route = route_query(query)
+    dense_hits = []
+    lexical_hits = []
 
-    embeddings = await get_embeddings([query])
-    query_vector = embeddings[0]
+    if route != "lexical":
+        query_vector = (await get_embeddings([query]))[0]
+        response = client.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            using="dense",
+            limit=limit,
+            with_payload=True,
+        )
+        # min_score remains a dense cosine threshold; it is never applied to
+        # incomparable sparse or RRF scores.
+        dense_hits = [hit for hit in response.points if hit.score >= min_score]
 
-    response = c.query_points(
-        collection_name=collection_name,
-        query=query_vector,
-        limit=limit,
-        with_payload=True,
-    )
-    return [hit for hit in response.points if hit.score >= min_score]
+    if route != "semantic":
+        response = client.query_points(
+            collection_name=collection_name,
+            query=sparse_vector(query),
+            using="lexical",
+            limit=limit,
+            with_payload=True,
+        )
+        lexical_hits = list(response.points)
+
+    if route == "semantic":
+        return dense_hits
+    if route == "lexical":
+        return lexical_hits
+
+    rankings = [[hit.id for hit in dense_hits], [hit.id for hit in lexical_hits]]
+    fused_ids = rrf_fuse(rankings)
+    by_id = {hit.id: hit for hit in dense_hits + lexical_hits}
+    rrf_scores = {}
+    for ranking in rankings:
+        for rank, point_id in enumerate(ranking, 1):
+            rrf_scores[point_id] = rrf_scores.get(point_id, 0.0) + 1.0 / (60 + rank)
+    return [RetrievedHit(
+        id=point_id,
+        score=rrf_scores[point_id],
+        payload=dict(by_id[point_id].payload or {}),
+    ) for point_id in fused_ids]
 
 
-# --- Per-file aggregation (search output dedup) ---
-def aggregate_hits_by_file(hits, top_chunks_per_file: int = 1) -> list[dict]:
-    """Collapse raw Qdrant hits into one summary per file.
+# --- Hybrid retrieval + per-file aggregation ---
+def _lexical_tokens(text: str) -> list[str]:
+    import re
+    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    tokens = re.findall(r"[A-Za-z0-9]+", expanded.lower())
+    return [token for token in tokens if len(token) > 1]
 
-    Each hit is expected to expose ``.score`` (float) and ``.payload`` (dict
-    with at least ``file``, and optionally ``chunk``, ``line_start``,
-    ``line_end``, ``chunk_index``).
 
-    Returns a list of dicts, one per distinct file, sorted by the file's best
-    score (descending). Each summary:
+def sparse_vector(text: str):
+    """Deterministic hashed sparse vector for identifiers and lexical terms."""
+    from collections import Counter
+    from qdrant_client.models import SparseVector
 
-      {
-        "file": str,
-        "chunk_count": int,          # how many of this file's chunks matched
-        "best_score": float,         # highest score among the file's chunks
-        "line_start": int,           # min line_start across matched chunks
-        "line_end": int,             # max line_end across matched chunks
-        "best_chunk": str,           # the highest-scoring chunk's text
-        "chunks": [                  # top_chunks_per_file chunks, score-desc
-            {"chunk": str, "score": float, "line_start": int, "line_end": int},
-            ...
-        ],
-      }
-    """
+    counts = Counter(_lexical_tokens(text))
+    pairs = []
+    for token, count in counts.items():
+        index = int.from_bytes(hashlib.sha256(token.encode()).digest()[:4], "big") & 0x7FFFFFFF
+        pairs.append((index, float(count)))
+    pairs.sort()
+    return SparseVector(indices=[p[0] for p in pairs], values=[p[1] for p in pairs])
+
+
+def route_query(query: str) -> str:
+    """Route without an LLM: exact identifier/path, semantic sentence, or mixed."""
+    import re
+    words = query.split()
+    has_identifier = bool(re.search(r"[a-z0-9][A-Z]|[a-z]+_[a-z]|['\"]", query))
+    has_path = "/" in query or bool(re.search(r"\.[A-Za-z0-9]{1,6}$", query.strip()))
+    if has_path or ((has_identifier or len(words) == 1) and len(words) <= 2):
+        return "lexical"
+    if has_identifier:
+        return "hybrid"
+    if len(words) >= 4:
+        return "semantic"
+    return "hybrid"
+
+
+def rrf_fuse(rankings: list[list], k: int = 60) -> list:
+    """Reciprocal Rank Fusion (RRF) without cross-score normalization."""
+    scores = {}
+    first_seen = {}
+    seen_counter = 0
+    for ranking in rankings:
+        for rank, item in enumerate(ranking, 1):
+            if item not in first_seen:
+                first_seen[item] = seen_counter
+                seen_counter += 1
+            scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank)
+    return sorted(scores, key=lambda item: (-scores[item], first_seen[item]))
+
+
+def aggregate_hits_by_file(hits, top_chunks_per_file: int = 1,
+                           query: str | None = None) -> list[dict]:
+    """Rank files by best hit + corroborating chunks + symbol/path evidence."""
     by_file: dict[str, list] = {}
-    for h in hits:
-        payload = getattr(h, "payload", None) or {}
-        file = payload.get("file", "unknown")
-        by_file.setdefault(file, []).append((h, payload))
+    for hit in hits:
+        payload = getattr(hit, "payload", None) or {}
+        key = payload.get("rel_path") or payload.get("file", "unknown")
+        by_file.setdefault(key, []).append((hit, payload))
 
+    query_tokens = set(_lexical_tokens(query or ""))
     summaries = []
-    for file, entries in by_file.items():
-        # Sort this file's chunks by score descending.
+    for key, entries in by_file.items():
         entries.sort(key=lambda ep: ep[0].score, reverse=True)
-        best_score = entries[0][0].score
+        best_score = float(entries[0][0].score)
         line_starts = [ep[1].get("line_start", 0) for ep in entries]
         line_ends = [ep[1].get("line_end", 0) for ep in entries]
-        top = []
-        for h, payload in entries[:max(0, top_chunks_per_file)]:
-            top.append({
-                "chunk": payload.get("chunk", ""),
-                "score": h.score,
-                "line_start": payload.get("line_start", 0),
-                "line_end": payload.get("line_end", 0),
-            })
+        symbols = []
+        for _, payload in entries:
+            for symbol in payload.get("symbols", []):
+                if symbol not in symbols:
+                    symbols.append(symbol)
+        symbol_tokens = set(_lexical_tokens(" ".join(symbols)))
+        path = entries[0][1].get("rel_path") or key
+        path_tokens = set(_lexical_tokens(path))
+        multi_bonus = min(0.10, 0.05 * max(0, len(entries) - 1))
+        symbol_bonus = 0.08 if query_tokens & symbol_tokens else 0.0
+        path_bonus = 0.04 if query_tokens & path_tokens else 0.0
+        file_score = best_score + multi_bonus + symbol_bonus + path_bonus
+        top = [{
+            "chunk": payload.get("chunk", ""),
+            "score": float(hit.score),
+            "line_start": payload.get("line_start", 0),
+            "line_end": payload.get("line_end", 0),
+        } for hit, payload in entries[:max(0, top_chunks_per_file)]]
         summaries.append({
-            "file": file,
+            "file": entries[0][1].get("file", key),
+            "rel_path": path,
             "chunk_count": len(entries),
             "best_score": best_score,
+            "file_score": file_score,
+            "symbols": symbols,
             "line_start": min(line_starts) if line_starts else 0,
             "line_end": max(line_ends) if line_ends else 0,
             "best_chunk": entries[0][1].get("chunk", ""),
             "chunks": top,
         })
-
-    summaries.sort(key=lambda s: s["best_score"], reverse=True)
+    summaries.sort(key=lambda summary: summary["file_score"], reverse=True)
     return summaries
+
+
+def format_file_results(files: list[dict], query: str) -> str:
+    """Render compact navigation evidence; callers should read real files next."""
+    lines = [f"Best files for: {query}", ""]
+    for index, result in enumerate(files, 1):
+        lines.append(f"{index}. {result.get('rel_path') or result.get('file')} (score {result['file_score']:.4f})")
+        symbols = result.get("symbols") or []
+        if symbols:
+            lines.append("   symbols: " + ", ".join(symbols[:8]))
+        lines.append(f"   best match: lines {result.get('line_start', 0)}-{result.get('line_end', 0)}")
+        snippet = " ".join((result.get("best_chunk") or "").split())
+        if len(snippet) > 300:
+            snippet = snippet[:300] + "…"
+        if snippet:
+            lines.append("   snippet: " + snippet)
+        lines.append("")
+    return "\n".join(lines).rstrip()
