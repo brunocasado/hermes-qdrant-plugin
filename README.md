@@ -26,7 +26,7 @@ question → dense + lexical retrieval → file aggregation → top 5–8 files 
 7. Exact identifiers/path-like queries prefer lexical search; natural-language questions prefer dense; mixed queries combine both with Reciprocal Rank Fusion.
 8. Internal retrieval is broad (at least 60 chunks); output is narrow (at most 8 files), ranked with multi-chunk, symbol and path evidence.
 
-Tool-generated worktrees/state directories such as `.worktrees/`, `.kilo/` and `.hermes/` are excluded so temporary branch copies do not duplicate the main project index.
+Tool-generated worktrees/state directories such as `.worktrees/`, `.kilo/`, `.hermes/` and `backups/` are excluded so temporary branch copies and snapshots do not duplicate the main project index.
 
 Qdrant is navigation evidence, not source of truth. Consumers should read returned files before reasoning or editing.
 

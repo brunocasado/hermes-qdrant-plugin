@@ -157,7 +157,7 @@ async def get_embeddings(texts: list[str]) -> list[list[float]]:
 
 
 # --- File Discovery ---
-SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".idea", ".vscode", ".worktrees", ".kilo", "dist", "build", ".next", ".nuxt", ".output", ".cache", "vendor", "target", "out", "bin", "obj", ".hermes", "benchmarks"}
+SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".idea", ".vscode", ".worktrees", ".kilo", "dist", "build", ".next", ".nuxt", ".output", ".cache", "vendor", "target", "out", "bin", "obj", ".hermes", "benchmarks", "backups"}
 SKIP_EXTS = {".lock", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".map", ".pt", ".pth", ".bin", ".so", ".dylib", ".dll", ".exe", ".pyc", ".pyo", ".DS_Store"}
 INDEXABLE_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs",

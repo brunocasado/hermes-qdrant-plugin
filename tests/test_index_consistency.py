@@ -72,6 +72,8 @@ def test_discovery_excludes_tool_worktrees_but_keeps_project_sources(tmp_path):
     (root / ".worktrees" / "branch" / "copy.ts").write_text("copy\n")
     (root / "package" / ".kilo" / "worktrees" / "task").mkdir(parents=True)
     (root / "package" / ".kilo" / "worktrees" / "task" / "copy.ts").write_text("copy\n")
+    (root / "service" / "backups" / "snapshot").mkdir(parents=True)
+    (root / "service" / "backups" / "snapshot" / "slots.json").write_text("{}\n")
 
     discovered = {
         str(Path(path).relative_to(root)) for path in core.discover_files(str(root))
