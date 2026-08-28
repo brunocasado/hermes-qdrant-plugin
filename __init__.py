@@ -197,19 +197,22 @@ def register(ctx):
         name="qdrant_index",
         toolset="qdrant",
         schema={
-            "type": "object",
-            "properties": {
-                "directory": {"type": "string", "description": "Directory to index (default: session working dir)"},
-                "collection_name": {"type": "string", "description": "Collection name (auto: the project folder name, slugified, if omitted)"},
-                "chunk_size": {"type": "integer", "description": "Estimated tokens per chunk (default 350; final enriched input is hard-bounded)"},
-                "chunk_overlap": {"type": "integer", "description": "Estimated token overlap (default 60)"},
-                "reindex": {"type": "boolean", "description": "Force full re-index"},
+            "name": "qdrant_index",
+            "description": "Index a project's files into Qdrant for semantic search (incremental by SHA-256).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directory": {"type": "string", "description": "Directory to index (default: session working dir)"},
+                    "collection_name": {"type": "string", "description": "Collection name (auto: the project folder name, slugified, if omitted)"},
+                    "chunk_size": {"type": "integer", "description": "Estimated tokens per chunk (default 350; final enriched input is hard-bounded)"},
+                    "chunk_overlap": {"type": "integer", "description": "Estimated token overlap (default 60)"},
+                    "reindex": {"type": "boolean", "description": "Force full re-index"},
+                },
+                "required": [],
             },
-            "required": [],
         },
         handler=qdrant_index,
         is_async=True,
-        description="Index a project's files into Qdrant for semantic search (incremental by SHA-256).",
         emoji="📦",
     )
 
@@ -249,18 +252,21 @@ def register(ctx):
         name="qdrant_search",
         toolset="qdrant",
         schema={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Natural-language question, exact identifier, filename or path"},
-                "collection_name": {"type": "string", "description": "Omit to search the current project's collection"},
-                "limit": {"type": "integer", "default": 10},
-                "min_score": {"type": "number", "default": 0.0, "description": "Dense cosine threshold before hybrid fusion; not applied to lexical/RRF scores"},
+            "name": "qdrant_search",
+            "description": "Return the top 5-8 project FILE candidates with symbols, line ranges and snippets. Read the returned real files before reasoning or editing; Qdrant is a discovery layer, not source of truth.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural-language question, exact identifier, filename or path"},
+                    "collection_name": {"type": "string", "description": "Omit to search the current project's collection"},
+                    "limit": {"type": "integer", "default": 10},
+                    "min_score": {"type": "number", "default": 0.0, "description": "Dense cosine threshold before hybrid fusion; not applied to lexical/RRF scores"},
+                },
+                "required": ["query"],
             },
-            "required": ["query"],
         },
         handler=qdrant_search,
         is_async=True,
-        description="Return the top 5-8 project FILE candidates with symbols, line ranges and snippets. Read the returned real files before reasoning or editing; Qdrant is a discovery layer, not source of truth.",
         emoji="🔎",
     )
 
@@ -317,15 +323,18 @@ def register(ctx):
         name="qdrant_status",
         toolset="qdrant",
         schema={
-            "type": "object",
-            "properties": {
-                "directory": {"type": "string", "description": "Project root (default: session working dir)"},
+            "name": "qdrant_status",
+            "description": "Index health for a project: file counts, staleness, last index time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directory": {"type": "string", "description": "Project root (default: session working dir)"},
+                },
+                "required": [],
             },
-            "required": [],
         },
         handler=qdrant_status,
         is_async=True,
-        description="Index health for a project: file counts, staleness, last index time.",
         emoji="📊",
     )
 
@@ -347,10 +356,13 @@ def register(ctx):
     ctx.register_tool(
         name="qdrant_list_collections",
         toolset="qdrant",
-        schema={"type": "object", "properties": {}},
+        schema={
+            "name": "qdrant_list_collections",
+            "description": "List all Qdrant collections with their point counts.",
+            "parameters": {"type": "object", "properties": {}},
+        },
         handler=qdrant_list_collections,
         is_async=True,
-        description="List all Qdrant collections with their point counts.",
         emoji="📋",
     )
 
@@ -386,15 +398,18 @@ def register(ctx):
         name="qdrant_delete_collection",
         toolset="qdrant",
         schema={
-            "type": "object",
-            "properties": {
-                "collection_name": {"type": "string", "description": "The collection to delete"},
+            "name": "qdrant_delete_collection",
+            "description": "Delete a Qdrant collection. This action cannot be undone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "collection_name": {"type": "string", "description": "The collection to delete"},
+                },
+                "required": ["collection_name"],
             },
-            "required": ["collection_name"],
         },
         handler=qdrant_delete_collection,
         is_async=True,
-        description="Delete a Qdrant collection. This action cannot be undone.",
         emoji="🗑️",
     )
 
@@ -445,20 +460,23 @@ def register(ctx):
         name="qdrant_set_server",
         toolset="qdrant",
         schema={
-            "type": "object",
-            "properties": {
-                "host": {"type": "string", "description": "Qdrant host (e.g. 'localhost')"},
-                "port": {"type": "integer", "description": "Qdrant port (default 6333)"},
-                "base_url": {"type": "string", "description": "Embedding API base URL (OpenAI-compatible, e.g. 'http://localhost:8080/v1')"},
-                "model": {"type": "string", "description": "Embedding model name (e.g. 'embeddings')"},
-                "api_key": {"type": "string", "description": "Embedding API key (use 'EMPTY' if the server needs no auth)"},
-                "vector_dim": {"type": "integer", "description": "Embedding vector dimension (must match the model)"},
+            "name": "qdrant_set_server",
+            "description": "Point the plugin at a different Qdrant server and/or embedding endpoint (runtime, persisted to config.json).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string", "description": "Qdrant host (e.g. 'localhost')"},
+                    "port": {"type": "integer", "description": "Qdrant port (default 6333)"},
+                    "base_url": {"type": "string", "description": "Embedding API base URL (OpenAI-compatible, e.g. 'http://localhost:8080/v1')"},
+                    "model": {"type": "string", "description": "Embedding model name (e.g. 'embeddings')"},
+                    "api_key": {"type": "string", "description": "Embedding API key (use 'EMPTY' if the server needs no auth)"},
+                    "vector_dim": {"type": "integer", "description": "Embedding vector dimension (must match the model)"},
+                },
+                "required": [],
             },
-            "required": [],
         },
         handler=qdrant_set_server,
         is_async=True,
-        description="Point the plugin at a different Qdrant server and/or embedding endpoint (runtime, persisted to config.json).",
         emoji="🎛️",
     )
 
