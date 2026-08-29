@@ -177,9 +177,34 @@ INDEXABLE_EXTS = {
 MAX_DISCOVER_FILES = 20000  # hard cap: protects against walking huge roots (e.g. $HOME)
 
 
+def load_qdrantignore(dir_path: Path) -> dict[str, set[str]]:
+    """Load ``<root>/.qdrantignore`` — one relative directory per line.
+
+    Directories named here are pruned during discovery, so their files are
+    never indexed and any previously indexed points for them are deleted on
+    the next index run (the deleted-rel-path prune pass). Lines are relative
+    to the root; ``#`` starts a comment; trailing slashes are stripped.
+    """
+    ignore_file = dir_path / ".qdrantignore"
+    if not ignore_file.is_file():
+        return {}
+    by_parent: dict[str, set[str]] = {}
+    for raw in ignore_file.read_text().splitlines():
+        line = raw.strip().rstrip("/")
+        if not line or line.startswith("#"):
+            continue
+        parent, _, name = line.rpartition("/")
+        by_parent.setdefault(parent, set()).add(name)
+    return by_parent
+
+
 def discover_files(directory: str, max_files: int = MAX_DISCOVER_FILES) -> list[str]:
-    """Discover indexable files in a directory (bounded by max_files)."""
+    """Discover indexable files in a directory (bounded by max_files).
+
+    Skips SKIP_DIRS plus any directories listed in <root>/.qdrantignore.
+    """
     dir_path = Path(directory).resolve()
+    ignored = load_qdrantignore(dir_path)
     # The plugin's own state (hash cache / registry / config) is never index
     # content. Without this exclusion, indexing the plugin's own root is
     # self-referential: every index run rewrites hash-cache.json and
@@ -196,7 +221,11 @@ def discover_files(directory: str, max_files: int = MAX_DISCOVER_FILES) -> list[
         state_files.update(str(p) for p in legacy_data.iterdir() if p.is_file())
     files = []
     for root, dirs, filenames in os.walk(dir_path):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        rel = os.path.relpath(root, dir_path)
+        if rel == os.curdir:
+            rel = ""
+        prune = SKIP_DIRS | ignored.get(rel, set())
+        dirs[:] = [d for d in dirs if d not in prune]
         for f in filenames:
             full = os.path.join(root, f)
             ext = os.path.splitext(f)[1].lower()
