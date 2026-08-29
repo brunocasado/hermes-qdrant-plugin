@@ -808,7 +808,7 @@ async def search_qdrant(
     collection_name: str,
     query: str,
     limit: int = 10,
-    min_score: float = 0.0,
+    min_score: float = 0.25,
 ) -> list:
     """Route dense/lexical retrieval and combine mixed queries with RRF."""
     client = get_client()

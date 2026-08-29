@@ -197,7 +197,7 @@ def main():
     p.add_argument("query", nargs="+", help="query words (joined with spaces)")
     p.add_argument("--collection", default="")
     p.add_argument("--limit", type=int, default=5)
-    p.add_argument("--min-score", type=float, default=0.0)
+    p.add_argument("--min-score", type=float, default=0.25)
     p.set_defaults(fn=cmd_search)
 
     p = sub.add_parser("list", help="list collections")

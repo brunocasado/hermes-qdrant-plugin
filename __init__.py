@@ -217,7 +217,7 @@ def register(ctx):
     )
 
     # --- qdrant_search ---
-    async def _do_search(query, collection_name="", limit=10, min_score=0.0):
+    async def _do_search(query, collection_name="", limit=10, min_score=0.25):
         root = _session_cwd()
         collection = collection_name or registry.collection_for_root(root)
         if not collection:
@@ -245,7 +245,7 @@ def register(ctx):
             query=args.get("query", ""),
             collection_name=args.get("collection_name", ""),
             limit=args.get("limit", 10),
-            min_score=args.get("min_score", 0.0),
+            min_score=args.get("min_score", 0.25),
         )
 
     ctx.register_tool(
@@ -260,7 +260,7 @@ def register(ctx):
                     "query": {"type": "string", "description": "Natural-language question, exact identifier, filename or path"},
                     "collection_name": {"type": "string", "description": "Omit to search the current project's collection"},
                     "limit": {"type": "integer", "default": 10},
-                    "min_score": {"type": "number", "default": 0.0, "description": "Dense cosine threshold before hybrid fusion; not applied to lexical/RRF scores"},
+                    "min_score": {"type": "number", "default": 0.25, "description": "Dense cosine threshold before hybrid fusion (default 0.25); not applied to lexical/RRF scores"},
                 },
                 "required": ["query"],
             },

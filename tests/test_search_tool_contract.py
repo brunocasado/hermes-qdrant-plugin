@@ -12,3 +12,11 @@ def test_search_retrieves_broadly_and_returns_narrowly():
 
 def test_search_tool_tells_agent_to_read_real_files():
     assert "Read the returned real files before reasoning or editing" in SOURCE
+
+
+def test_min_score_default_filters_low_signal_dense_hits():
+    import core
+    # core.py search_qdrant signature default
+    assert core.search_qdrant.__defaults__[-1] == 0.25
+    # tool schema default shown to the model
+    assert '"min_score": {"type": "number", "default": 0.25' in SOURCE
