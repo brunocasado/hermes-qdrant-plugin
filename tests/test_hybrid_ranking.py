@@ -40,11 +40,16 @@ def test_rrf_rewards_items_present_in_both_rankings():
     assert set(fused) == {"a", "b", "c", "d"}
 
 
-def test_query_router_distinguishes_identifier_semantic_and_mixed():
+def test_query_router_distinguishes_identifier_and_prose():
     assert core.route_query("FollowUpAfter") == "lexical"
-    assert core.route_query("where is follow-up scheduling calculated?") == "semantic"
+    assert core.route_query("where is follow-up scheduling calculated?") == "hybrid"
     assert core.route_query("where is FollowUpAfter used to calculate next send time?") == "hybrid"
     assert core.route_query("internal/campaign/scheduler.go") == "lexical"
+
+
+def test_prose_questions_are_never_dense_only():
+    assert core.route_query("how whatsapp process works") == "hybrid"
+    assert core.route_query("whatsapp message processing flow webhook handler") == "hybrid"
 
 
 def test_sparse_vector_rewards_exact_code_identifiers():

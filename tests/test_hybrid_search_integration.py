@@ -54,7 +54,7 @@ def test_mixed_query_runs_dense_and_lexical_then_rrf(monkeypatch):
     assert {hit.id for hit in hits} == {"a", "b", "c"}
 
 
-def test_semantic_query_prefers_dense_only(monkeypatch):
+def test_prose_query_runs_dense_and_lexical_then_rrf(monkeypatch):
     fake = FakeSearchClient()
     monkeypatch.setattr(core, "get_client", lambda: fake)
 
@@ -67,5 +67,5 @@ def test_semantic_query_prefers_dense_only(monkeypatch):
         "project", "where is the desktop statusbar pill rendered?", limit=20,
     ))
 
-    assert [call["using"] for call in fake.calls] == ["dense"]
-    assert {hit.id for hit in hits} == {"a", "b"}
+    assert [call["using"] for call in fake.calls] == ["dense", "lexical"]
+    assert {hit.id for hit in hits} == {"a", "b", "c"}

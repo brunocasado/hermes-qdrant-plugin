@@ -881,17 +881,18 @@ def sparse_vector(text: str):
 
 
 def route_query(query: str) -> str:
-    """Route without an LLM: exact identifier/path, semantic sentence, or mixed."""
+    """Route without an LLM: exact identifier/path, or hybrid (dense+lexical).
+
+    Plain prose always goes hybrid — never dense-only — so exact tokens
+    (a term appearing in a file name or a doc title) stay retrievable via
+    the lexical leg even in natural-language questions.
+    """
     import re
     words = query.split()
     has_identifier = bool(re.search(r"[a-z0-9][A-Z]|[a-z]+_[a-z]|['\"]", query))
     has_path = "/" in query or bool(re.search(r"\.[A-Za-z0-9]{1,6}$", query.strip()))
     if has_path or ((has_identifier or len(words) == 1) and len(words) <= 2):
         return "lexical"
-    if has_identifier:
-        return "hybrid"
-    if len(words) >= 4:
-        return "semantic"
     return "hybrid"
 
 
