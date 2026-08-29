@@ -79,3 +79,18 @@ def test_result_formatter_is_navigation_evidence_not_code_dump():
     assert "ScheduleCampaign" in rendered
     assert "lines 122-167" in rendered
     assert len(rendered) < 800
+
+
+def test_rrf_score_ties_break_deterministically_by_id():
+    # a and b get identical RRF (ranks swapped) -> order follows id, not list order
+    fused = core.rrf_fuse([["zzz", "aaa"], ["aaa", "zzz"]], k=60)
+    assert fused[:2] == ["aaa", "zzz"]
+
+
+def test_aggregate_file_score_ties_break_by_rel_path():
+    hits = [
+        hit("p1", 0.5, "z/second.ts"),
+        hit("p2", 0.5, "a/first.ts"),
+    ]
+    ranked = core.aggregate_hits_by_file(hits, query="nothing-matches-here")
+    assert [s["rel_path"] for s in ranked] == ["a/first.ts", "z/second.ts"]

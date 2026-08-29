@@ -899,15 +899,12 @@ def route_query(query: str) -> str:
 def rrf_fuse(rankings: list[list], k: int = 60) -> list:
     """Reciprocal Rank Fusion (RRF) without cross-score normalization."""
     scores = {}
-    first_seen = {}
-    seen_counter = 0
     for ranking in rankings:
         for rank, item in enumerate(ranking, 1):
-            if item not in first_seen:
-                first_seen[item] = seen_counter
-                seen_counter += 1
             scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank)
-    return sorted(scores, key=lambda item: (-scores[item], first_seen[item]))
+    # id tie-break: Qdrant gives no stable order for equal scores, so insertion
+    # order would make fused output (and everything downstream) non-reproducible
+    return sorted(scores, key=lambda item: (-scores[item], item))
 
 
 def aggregate_hits_by_file(hits, top_chunks_per_file: int = 1,
@@ -956,7 +953,8 @@ def aggregate_hits_by_file(hits, top_chunks_per_file: int = 1,
             "best_chunk": entries[0][1].get("chunk", ""),
             "chunks": top,
         })
-    summaries.sort(key=lambda summary: summary["file_score"], reverse=True)
+    # rel_path tie-break keeps file order reproducible when file_scores match
+    summaries.sort(key=lambda summary: (-summary["file_score"], summary["rel_path"]))
     return summaries
 
 
