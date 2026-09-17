@@ -233,7 +233,7 @@ export default {
         ? `${live.last_op.files_done || 0}/${live.last_op.files_total}`
         : null
 
-      const tip = transitioning
+      let tip = transitioning
         ? 'Resolving project…'
         : !live
           ? 'Qdrant index not available for this project'

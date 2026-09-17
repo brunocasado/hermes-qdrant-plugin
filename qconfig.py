@@ -48,6 +48,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
 }
 DEFAULT_ENABLED = False
+AUTO_SEARCH_DEFAULT = True  # per-turn auto-search (pre_llm_call injection) is on by default
 
 _ENV_MAP = {
     "QDRANT_HOST": ("qdrant", "host"),
@@ -116,6 +117,7 @@ def load_config() -> dict[str, Any]:
     file_cfg = _read_file()
     resolved: dict[str, Any] = {
         "enabled": DEFAULT_ENABLED,
+        "auto_search": bool(file_cfg.get("auto_search", AUTO_SEARCH_DEFAULT)),
         "projects": _projects_map(file_cfg),
         "qdrant": dict(DEFAULTS["qdrant"]),
         "embedding": dict(DEFAULTS["embedding"]),
@@ -150,6 +152,20 @@ def is_enabled(root: str | None = None) -> bool:
     if not root:
         return DEFAULT_ENABLED
     return _projects_map(_read_file()).get(_canonical_root(root), DEFAULT_ENABLED)
+
+
+def is_auto_search_enabled() -> bool:
+    """Return the global per-turn auto-search (pre_llm_call) state."""
+    return bool(_read_file().get("auto_search", AUTO_SEARCH_DEFAULT))
+
+
+def set_auto_search(value: bool) -> dict[str, Any]:
+    """Persist the global per-turn auto-search state."""
+    with _index_lock.metadata_lock("config"):
+        file_cfg = _read_file()
+        file_cfg["auto_search"] = bool(value)
+        _write_file(file_cfg)
+    return load_config()
 
 
 def set_enabled(root: str, value: bool) -> dict[str, Any]:
@@ -212,6 +228,7 @@ def describe() -> str:
     enabled_count = sum(1 for value in c.get("projects", {}).values() if value)
     return (
         f"Auto-index default: off (enabled projects: {enabled_count})\n"
+        f"Auto-search: {'on' if c.get('auto_search') else 'off'} (per-turn injection via pre_llm_call)\n"
         f"Qdrant:    {q['host']}:{q['port']}\n"
         f"Embedding: {e['base_url']}  (model={e['model']}, dim={e['vector_dim']}, key={redacted})"
     )

@@ -1,8 +1,12 @@
 """hermes-qdrant-plugin — agent half.
 
-Registers the 5 Qdrant tools (index / search / status / list / delete),
-the post_tool_call auto-reindex hook (60s debounce), and the
-register_system_prompt_section project-selection awareness line.
+Registers the Qdrant tools (index / search / status / list / delete /
+set_server), the post_tool_call auto-reindex hook (60s debounce), the
+pre_llm_call per-turn auto-search hook (Copilot-style RAG: the user's
+message is searched against the project index and the top file evidence is
+injected into the user message at API time — additive context, all tools
+stay available), and the register_system_prompt_section
+project-selection awareness line.
 """
 
 import asyncio
@@ -34,20 +38,23 @@ def register(ctx):
         from . import core
         from . import registry
         from . import qconfig
+        from . import auto_search
     except ImportError:
         import core
         import registry
         import qconfig
+        import auto_search
 
     def _resolve(directory: str) -> str:
         return str(Path(directory).expanduser().resolve()) if directory else _session_cwd()
 
-    def _session_cwd() -> str:
+    def _session_cwd(session_id: str = "") -> str:
         """Resolve the current project directory for a no-argument call.
 
         Priority (most authoritative first):
           1. The gateway session DB (sessions.cwd), looked up by the
-             HERMES_SESSION_ID env var. When a project is open in the window
+             explicitly passed session_id (hooks) or the HERMES_SESSION_ID
+             env var (tool handlers). When a project is open in the window
              the desktop pins it per session, and this is the authoritative
              "current project" — it survives the process-level cwd being home.
           2. The agent process's real cwd (os.getcwd), when it is a real
@@ -69,7 +76,7 @@ def register(ctx):
         try:
             import os as _os
             import sqlite3
-            session_id = _os.environ.get("HERMES_SESSION_ID", "").strip()
+            session_id = (session_id or "").strip() or _os.environ.get("HERMES_SESSION_ID", "").strip()
             if session_id:
                 from hermes_constants import get_hermes_home_override
                 hermes_home = Path(get_hermes_home_override() or Path.home() / ".hermes")
@@ -522,12 +529,76 @@ def register(ctx):
 
     ctx.register_hook("post_tool_call", _on_tool_call)
 
+    # --- pre_llm_call hook — per-turn auto-search (Copilot-style RAG) ---
+    # Fires once per user turn, before the LLM call; the payload carries the
+    # user's raw message (user_message) and the session_id. The returned
+    # {"context": ...} is appended to the user message at API time (never the
+    # system prompt — prefix caching stays intact) and is not persisted.
+    # Purely additive: no tool is removed, and the block tells the model that
+    # qdrant_search / search_files / any other tool remain available.
+
+    def _auto_search_evidence(root, collection, query):
+        """Sync: broad recall + file shortlist + injection block (or None).
+
+        Same pipeline as the qdrant_search tool (fetch wide, aggregate per
+        file, format compact evidence). The strict 0.30 semantic bar and the
+        route-aware gating live in auto_search.build_context.
+        """
+        async def _search():
+            hits = await core.search_qdrant(collection, query, 60, 0.25)
+            if not hits:
+                return None
+            summaries = core.aggregate_hits_by_file(hits, top_chunks_per_file=2, query=query)
+            if not summaries:
+                return None
+            return auto_search.build_context(query, summaries, core.route_query(query))
+
+        return asyncio.run(_search())
+
+    def _on_pre_llm_call(user_message="", session_id="", **kwargs):
+        try:
+            root = _session_cwd(session_id=session_id)
+            collection = registry.collection_for_root(root)
+            if not collection:
+                return None  # project not indexed — stay silent
+            if not auto_search.should_run(
+                user_message,
+                auto_search_enabled=qconfig.is_auto_search_enabled(),
+                has_collection=True,
+            ):
+                return None
+            query = str(user_message).strip()
+            try:
+                context = _auto_search_evidence(root, collection, query)
+            except RuntimeError:
+                # Called on a thread with a running loop — hop to a worker
+                # (asyncio.run is only valid on a fresh thread; the bounded
+                # hook path normally already is one).
+                box: dict = {}
+
+                def _worker():
+                    try:
+                        box["context"] = _auto_search_evidence(root, collection, query)
+                    except Exception:
+                        box["context"] = None
+
+                t = threading.Thread(target=_worker, daemon=True, name="qdrant-auto-search")
+                t.start()
+                t.join(25)
+                context = box.get("context")
+            return {"context": context} if context else None
+        except Exception:
+            return None  # never break the turn over a search failure
+
+    ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+
     # --- Slash command: /qdrant (terminal-free bootstrap/maintenance) ---
     # The tools below are async and already push blocking I/O (Qdrant calls,
     # disk walks) off the event loop via asyncio.to_thread, so awaiting them
     # here never stalls the gateway's command.dispatch (30s RPC timeout).
     _VALID_KEYS = (
         "enabled",
+        "auto_search",
         "qdrant.host", "qdrant.port",
         "embedding.base_url", "embedding.model", "embedding.api_key", "embedding.vector_dim",
     )
@@ -547,6 +618,8 @@ def register(ctx):
             if parts[1] == "enabled":
                 root = _resolve("")
                 return f"enabled[{root}] = {str(qconfig.is_enabled(root)).lower()}"
+            if parts[1] == "auto_search":
+                return f"auto_search = {str(qconfig.is_auto_search_enabled()).lower()}"
             section, key = parts[1].split(".", 1)
             return f"{parts[1]} = {qconfig.load_config()[section][key]}"
         if act == "set":
@@ -563,6 +636,16 @@ def register(ctx):
                 return ("Automatic indexing " +
                         ("enabled" if parts[2] in ("on", "true", "1") else "disabled") +
                         f" for {root}.\n\n" + qconfig.describe())
+            if parts[1] == "auto_search":
+                if parts[2] in ("on", "true", "1"):
+                    qconfig.set_auto_search(True)
+                elif parts[2] in ("off", "false", "0"):
+                    qconfig.set_auto_search(False)
+                else:
+                    return "'auto_search' must be on/off (or true/false, 1/0)"
+                return ("Per-turn auto-search " +
+                        ("enabled" if parts[2] in ("on", "true", "1") else "disabled") +
+                        ". Takes effect on the next user turn.\n\n" + qconfig.describe())
             section, key = parts[1].split(".", 1)
             value = parts[2]
             if parts[1] in _INT_KEYS:
